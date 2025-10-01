@@ -2,6 +2,7 @@ create or replace function rpc_match_programs(
   p_deal_id bigint,
   p_filters jsonb default '{}'::jsonb,   -- UI filters (recourse, amortization, cltc_pct, tpe_pct, etc.)
   p_sort_by text default 'updated',      -- 'updated'|'rate'|'score'
+  p_match_only boolean default true,  -- if true, only return programs that fully match all criteria; if false, return all candidates with match score
   p_limit int default 100
 )
 returns table (
@@ -9,6 +10,7 @@ returns table (
   program_name          text,
   organization_id       bigint,
   organization_name     text,
+  organization_hq_location     text,
   match_score           numeric,
   matched               boolean,
   match_reasons         jsonb,
@@ -47,6 +49,7 @@ candidates as (
     p.name                                     as p_name,
     p.organization_id                          as p_org_id,
     o.name                                     as p_org_name,
+    o.hq_location                              as p_org_location,
     p.recourse                                 as p_recourse,
     p.typical_amortization                     as p_typical_amortization,
     p.minimum_check_size                       as p_minimum_check_size,
@@ -69,6 +72,7 @@ candidates as (
     p.min_net_worth_ratio                                   as p_min_net_worth_ratio,
     p.min_liquidity                                         as p_min_liquidity,
     p.min_liquidity_ratio                                   as p_min_liquidity_ratio,
+    p.maximum_ltc                                           as p_maximum_ltc,
     p.sponsor_aum_req                                       as p_sponsor_aum_req,
     p.min_credit_score                                      as p_min_credit_score,
     p.us_citizenship_required                               as p_us_citizenship_required,
@@ -110,6 +114,7 @@ select
   c.p_name                 as program_name,
   c.p_org_id               as organization_id,
   c.p_org_name             as organization_name,
+  c.p_org_location         as organization_hq_location,
   
   -- MATCH SCORE: count of true booleans among the checks (raw integer count; there are 17 checks)
   (
@@ -198,14 +203,16 @@ from (
   -- compute every boolean here so the outer select stays tidy
   select
     *,
-    -- recourse filter (keeps your Non-Recourse special rule)
+    -- program filters from UI
+    -- recourse filter exact-match (if provided array)
     (case
-       when recourse_filter is null then true
-       when lower(recourse_filter) = 'non-recourse' then
-         lower(coalesce(p_recourse,'')) = 'selective'
-       when lower(recourse_filter) = 'recourse' then
-         lower(coalesce(p_recourse,'')) = 'always non-recourse'
-       else true
+      when recourse_filter is null then true
+      else lower(coalesce(p_recourse, '')) = ANY(
+        ARRAY(
+          SELECT lower(x)
+          FROM jsonb_array_elements_text(recourse_filter::jsonb) x
+        )
+      )
     end) as recourse_ok,
 
     -- amortization exact-match (if provided)
@@ -223,10 +230,18 @@ from (
 
     -- fits CLTC if user provided a cltc_pct AND program has Senior AND check fits within min/max
     (
-      (cltc_pct IS NOT NULL)
-      AND ('Senior' = ANY(coalesce(p_capital_stack, ARRAY[]::text[])))
-      AND (coalesce(p_maximum_check_size, 0) >= (coalesce(cltc_pct, 0) * coalesce(d_value, 0)))
-      AND (coalesce(p_minimum_check_size, 0) <= (coalesce(cltc_pct, 0) * coalesce(d_value, 0)))
+      CASE
+        WHEN cltc_pct IS NULL THEN
+          (coalesce(d_value, 0) > coalesce(p_minimum_check_size, 0)
+           AND coalesce(d_value, 0) < coalesce(p_maximum_check_size, 0))
+        ELSE
+          (cltc_pct IS NOT NULL)
+          AND ('Senior' = ANY(coalesce(p_capital_stack, ARRAY[]::text[])))
+          AND (coalesce(p_maximum_check_size, 0) >= (coalesce(cltc_pct, 0) * coalesce(d_value, 0)))
+          AND (coalesce(p_minimum_check_size, 0) <= (coalesce(cltc_pct, 0) * coalesce(d_value, 0)))
+          -- CLTC value itself should be less than or equal to the program's given LTC if that program is matching on a Senior position.
+          AND (coalesce(cltc_pct, 0) <= coalesce(p_maximum_ltc, 0))
+      END
     ) as fits_cltc,
 
     -- fits Third Party Equity if user provided tpe_pct AND program has Equity AND check fits
@@ -352,32 +367,31 @@ from (
   from candidates
 ) c
 
--- TODO return all candidates to see almost matching, can filter in UI, or only matches?
--- where
---   -- only return programs that satisfy the filtering boolean set (you can remove this WHERE to return near-misses)
---   (
---     c.recourse_ok
---     and c.amortization_ok
---     and (
---       -- if the UI supplied either sizing pct, require at least one sizing path to match
---       (not c.sizing_filter_provided) OR (c.fits_cltc OR c.fits_tpe)
---     )
---     and c.financing_ok
---     and c.location_ok
---     and c.asset_type_ok
---     and c.investment_strategy_ok
---     and c.tenancy_ok
---     and c.hotel_ok
---     and c.guarantor_ok
---     and c.sponsor_location_ok
---     and c.experience_ok
---     and c.net_worth_ok
---     and c.liquidity_ok
---     and c.liquidity_ratio_ok
---     and c.aum_ok
---     and c.credit_ok
---     and c.us_citizenship_ok
---   )
+where
+  -- only return programs that satisfy the filtering boolean set (you can remove this WHERE to return near-misses)
+  (
+    c.recourse_ok
+    and c.amortization_ok
+    and (
+      -- if the UI supplied either sizing pct, require at least one sizing path to match
+      (not c.sizing_filter_provided) OR (c.fits_cltc OR c.fits_tpe)
+    )
+    and c.financing_ok
+    and c.location_ok
+    and c.asset_type_ok
+    and c.investment_strategy_ok
+    and c.tenancy_ok
+    and c.hotel_ok
+    and c.guarantor_ok
+    and c.sponsor_location_ok
+    and c.experience_ok
+    and c.net_worth_ok
+    and c.liquidity_ok
+    and c.liquidity_ratio_ok
+    and c.aum_ok
+    and c.credit_ok
+    and c.us_citizenship_ok
+  ) or (not p_match_only)  -- if p_match_only is false, return all candidates
 
 order by
 
