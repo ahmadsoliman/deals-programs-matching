@@ -1,12 +1,13 @@
--- GRANT EXECUTE ON FUNCTION public.rpc_match_programs(bigint, jsonb, text, boolean, int)
--- TO anon, authenticated;
+
 
 create or replace function rpc_match_programs(
   p_deal_id bigint,
   p_filters jsonb default '{}'::jsonb,   -- UI filters (recourse, amortization, cltc_pct, tpe_pct, etc.)
   p_sort_by text default 'updated',      -- 'updated'|'rate'|'score'
   p_match_only boolean default true,  -- if true, only return programs that fully match all criteria; if false, return all candidates with match score
-  p_limit int default 100
+  -- Replace the p_limit parameter with pagination parameters
+  p_limit int default 100,
+  p_offset int default 0
 )
 returns table (
   program_id            bigint,
@@ -85,12 +86,14 @@ candidates as (
     p.sponsor_aum_req                                       as p_sponsor_aum_req,
     p.min_credit_score                                      as p_min_credit_score,
     p.us_citizenship_required                               as p_us_citizenship_required,
- 
     pe.extra as p_extra,
 
     -- deal fields (explicit aliases)
     d.financing_type            as d_financing_type,          -- text[]
     d.property_address          as d_property_address,
+    d.city_town_village_locality_of_property_address as d_city_town_village_locality_of_property_address,
+    d.state_county_of_property_address as d_state_county_of_property_address,
+    d.region_of_property_address as d_region_of_property_address,
     d.asset_type                as d_asset_type,              -- text[]
     d.investment_strategy       as d_investment_strategy,
     d.tenancy                   as d_tenancy,
@@ -252,7 +255,7 @@ results as (
             AND (coalesce(p_maximum_check_size, 0) >= (coalesce(cltc_pct, 0) * coalesce(d_value, 0)))
             AND (coalesce(p_minimum_check_size, 0) <= (coalesce(cltc_pct, 0) * coalesce(d_value, 0)))
           -- CLTC value itself should be less than or equal to the program's given LTC if that program is matching on a Senior position.
-            AND (coalesce(cltc_pct, 0) <= coalesce(p_maximum_ltc, 0))q
+            AND (coalesce(cltc_pct, 0) <= coalesce(p_maximum_ltc, 0))
           )
         end
       ) as fits_cltc,
@@ -274,17 +277,13 @@ results as (
         OR (coalesce(d_financing_type, ARRAY[]::text[]) && coalesce(p_transaction_types, ARRAY[]::text[]))
       ) as financing_ok,
 
-   -- property location: if program target list empty -> match, otherwise check city OR county OR state
-      (
-        (jsonb_array_length(coalesce(p_target_property_locations, '[]'::jsonb)) = 0)
-        OR true -- IGNORE location matching for now TODO
-      -- This needs much better logic since p_target_property_locations is a JSONB array of objects with city/county/state fields
-      -- OR (
-      --    (coalesce(d_property_city,'') <> '' AND lower(coalesce(d_property_city,'')) = any (array(select lower(x) from unnest(coalesce(p_target_property_locations, ARRAY[]::text[])) x)))
-      --    OR (coalesce(d_property_county,'') <> '' AND lower(coalesce(d_property_county,'')) = any (array(select lower(x) from unnest(coalesce(p_target_property_locations, ARRAY[]::text[])) x)))
-      --    OR (coalesce(d_property_state,'') <> '' AND lower(coalesce(d_property_state,'')) = any (array(select lower(x) from unnest(coalesce(p_target_property_locations, ARRAY[]::text[])) x)))
-      -- )
-      ) as location_ok,
+    -- property location: if program target list empty -> match, otherwise check via fuzzy match or substring
+    location_matches_exact_split(
+        d_city_town_village_locality_of_property_address,
+        d_state_county_of_property_address,
+        d_region_of_property_address,
+        p_target_property_locations
+    ) as location_ok,
 
     -- asset type: this is actually a many-to-many link table in program_asset_types table
     -- asset_type: program empty => match, otherwise any overlap
@@ -326,13 +325,13 @@ results as (
 
     -- sponsor location: if program blank => match, else check sponsor city/county/state against sponsor_location_req
       (
-        true  -- IGNORE sponsor location matching for now TODO
-        -- This needs much better logic since p_sponsor_location_req is a JSONB array of objects with city/county/state fields
-        -- OR (
-        --    (coalesce(d_sponsor_city,'') <> '' AND lower(coalesce(d_sponsor_city,'')) = any(array(select lower(x) from unnest(coalesce(p_sponsor_location_req, ARRAY[]::text[])) x)))
-        --    OR (coalesce(d_sponsor_county,'') <> '' AND lower(coalesce(d_sponsor_county,'')) = any(array(select lower(x) from unnest(coalesce(p_sponsor_location_req, ARRAY[]::text[])) x)))
-        --    OR (coalesce(d_sponsor_state,'') <> '' AND lower(coalesce(d_sponsor_state,'')) = any(array(select lower(x) from unnest(coalesce(p_sponsor_location_req, ARRAY[]::text[])) x)))
-        -- )
+        (p_sponsor_location_req IS NULL OR p_sponsor_location_req = '')
+        OR
+          (COALESCE(
+            (
+              similarity(lower(d_sponsor_location), lower(p_sponsor_location_req)) >= 0.8
+            ), false)
+          )
       ) as sponsor_location_ok,
 
     -- experience level: if program blank => match, if deal blank => match, else exact match
@@ -450,97 +449,37 @@ order by
   match_score desc,
   updated_at desc nulls last,
   program_id
-limit p_limit;
+limit p_limit offset p_offset;
 $$;
 
+select
+  *
+from
+  rpc_match_programs (3);
+
+select
+  *
+from
+  rpc_match_programs (
+    p_deal_id := 39,
+    p_filters := '{}'::jsonb,
+    p_sort_by := 'updated',
+    p_match_only := false,
+    p_limit := 15,
+    p_offset := 0
+  );
+
 select * from rpc_match_programs(34);
-
--- select
---   *
--- from
---   deals d
---   cross join lateral rpc_match_programs (d.id)
--- order by
---   d.id,
---   program_id;
-
-select * from rpc_match_programs(30);
 
 -- select * 
 -- from rpc_match_programs(
 --   p_deal_id := 26,
---   p_filters := '{"recourse":"Non-Recourse","amortization":"25"}',
+--   p_filters := NULL, --'{"recourse":["Non-Recourse"],"amortization":"25"}',
 --   p_sort_by := 'updated',
---   p_limit := 100
+--   p_match_only := true,
+--   p_limit := 1000
 -- );
 
 
-create or replace function parse_money_to_numeric(txt text)
-returns numeric
-language plpgsql
-immutable
-as $$
-declare
-  s text;
-  part text;
-  num text;
-  multiplier numeric := 1;
-  res numeric;
-begin
-  if txt is null then
-    return null;
-  end if;
-
-  -- Normalize dashes (en/em) to ASCII hyphen and remove common currency/chars
-  s := txt;
-  s := regexp_replace(s, E'\\u2013|\\u2014', '-', 'g');   -- en/em dash -> hyphen
-  s := regexp_replace(s, '[\$\£\€\₹,]', '', 'g');        -- remove currency symbols and commas
-  s := lower(trim(s));
-
-  -- If it's a range, take the left/lowest bound (policy choice; change if you prefer average)
-  if s ~ '-' then
-    part := split_part(s, '-', 1);
-  elsif s ~ '\sto\s' then
-    part := split_part(s, ' to ', 1);
-  else
-    part := s;
-  end if;
-
-  part := trim(part);
-
-  -- Handle words like "million" "bn" "k" as suffixes
-  -- Normalize long words into single-letter suffixes
-  part := regexp_replace(part, '\s*million\b', 'm', 'gi');
-  part := regexp_replace(part, '\s*billion\b', 'b', 'gi');
-  part := regexp_replace(part, '\s*thousand\b', 'k', 'gi');
-
-  -- detect multiplier suffix (k,m,b)
-  if part ~ '[kmbr]$' then
-    case right(part,1)
-      when 'k' then multiplier := 1000;
-      when 'm' then multiplier := 1000000;
-      when 'b' then multiplier := 1000000000;
-      when 'r' then multiplier := 1; -- in case a weird suffix; keep as-is
-      else multiplier := 1;
-    end case;
-    part := left(part, char_length(part) - 1);
-  end if;
-
-  -- Remove any non-digit / non-dot left
-  num := regexp_replace(part, '[^0-9\.]', '', 'g');
-
-  if num = '' then
-    return null;
-  end if;
-
-  -- Try convert; return null on failure
-  begin
-    res := (num::numeric) * multiplier;
-    return res;
-  exception when others then
-    return null;
-  end;
-
-end;
-$$;
-
+-- -- Enable pg_trgm if it’s not already installed (run once)
+-- CREATE EXTENSION IF NOT EXISTS pg_trgm;
