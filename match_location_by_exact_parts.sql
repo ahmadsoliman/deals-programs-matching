@@ -1,59 +1,69 @@
 create or replace function public.location_matches_exact_split(
-  d_city_town_village_locality text,  -- metro or city
-  d_region                     text,  -- state/region
-  d_state_county               text,  -- county
-  p_target_locs                jsonb  -- program locations JSON
+  d_city_town_village_locality text default null,  -- city/town/village/locality
+  d_region                     text default null,  -- state (full name or abbreviation)
+  d_state_county               text default null,  -- county
+  d_zip_code                   text default null,
+  p_target_locs                jsonb default null
 )
 returns boolean
 language plpgsql
 stable
 as $$
 declare
-  -- Flatten the program’s location requirements.  p_target_locs may be a single
-  -- JSON object with “states”, “counties” and “metros” keys or an array of such
-  -- objects.  Wrap non-array inputs into a single-element array; extract the
-  -- arrays under each key and accumulate into flattened lists.  Lower-case all
-  -- entries for case-insensitive comparison.
-  v_states   text[] := coalesce(
+  -- Flatten the location filter criteria from p_target_locs.
+  v_states     text[] := coalesce(
     (
       select array_agg(lower(value::text))
       from jsonb_array_elements(
-             case when jsonb_typeof(p_target_locs) = 'array'
-                  then p_target_locs
-                  else jsonb_build_array(p_target_locs)
+             case 
+               when jsonb_typeof(p_target_locs) = 'array' then p_target_locs
+               else jsonb_build_array(p_target_locs)
              end
            ) obj
       left join lateral jsonb_array_elements_text(obj.value->'states') as value on true
     ),
     array[]::text[]
   );
-  v_counties text[] := coalesce(
+  v_counties   text[] := coalesce(
     (
       select array_agg(lower(value::text))
       from jsonb_array_elements(
-             case when jsonb_typeof(p_target_locs) = 'array'
-                  then p_target_locs
-                  else jsonb_build_array(p_target_locs)
+             case 
+               when jsonb_typeof(p_target_locs) = 'array' then p_target_locs
+               else jsonb_build_array(p_target_locs)
              end
            ) obj
       left join lateral jsonb_array_elements_text(obj.value->'counties') as value on true
     ),
     array[]::text[]
   );
-  v_metros   text[] := coalesce(
+  v_cities     text[] := coalesce(
     (
       select array_agg(lower(value::text))
       from jsonb_array_elements(
-             case when jsonb_typeof(p_target_locs) = 'array'
-                  then p_target_locs
-                  else jsonb_build_array(p_target_locs)
+             case 
+               when jsonb_typeof(p_target_locs) = 'array' then p_target_locs
+               else jsonb_build_array(p_target_locs)
              end
            ) obj
-      left join lateral jsonb_array_elements_text(obj.value->'metros') as value on true
+      left join lateral jsonb_array_elements_text(obj.value->'cities') as value on true
     ),
     array[]::text[]
   );
-  -- Full state names and their corresponding two-letter abbreviations.
+  v_zip_codes  text[] := coalesce(
+    (
+      select array_agg(lower(value::text))
+      from jsonb_array_elements(
+             case 
+               when jsonb_typeof(p_target_locs) = 'array' then p_target_locs
+               else jsonb_build_array(p_target_locs)
+             end
+           ) obj
+      left join lateral jsonb_array_elements_text(obj.value->'zip_codes') as value on true
+    ),
+    array[]::text[]
+  );
+  -- Lookup arrays for state full names and abbreviations.
   state_names text[] := array[
     'alabama','alaska','arizona','arkansas','california','colorado','connecticut',
     'delaware','district of columbia','florida','georgia','hawaii','idaho',
@@ -71,31 +81,32 @@ declare
     'ny','nc','nd','oh','ok','or','pa','ri','sc','sd','tn','tx','ut','vt','va','wa',
     'wv','wi','wy'
   ];
-  normalized_deal_state text;
+  normalized_state text;
 begin
-  -- No filters? Always match.
-  if coalesce(array_length(v_states,1),0) = 0
-     and coalesce(array_length(v_counties,1),0) = 0
-     and coalesce(array_length(v_metros,1),0) = 0 then
+  -- If no target location filters are provided, always match.
+  if coalesce(array_length(v_states,1),0) = 0 and
+     coalesce(array_length(v_counties,1),0) = 0 and
+     coalesce(array_length(v_cities,1),0) = 0 and
+     coalesce(array_length(v_zip_codes,1),0) = 0 then
     return true;
   end if;
 
-  -- Normalize the deal’s region to a two-letter abbreviation (lowercase).
-  normalized_deal_state := null;
+  -- Normalize the deal's state from d_region.
+  normalized_state := null;
   if d_region is not null and d_region <> '' then
-    normalized_deal_state := lower(d_region);
-    if char_length(normalized_deal_state) > 2 then
+    normalized_state := lower(d_region);
+    if char_length(normalized_state) > 2 then
       for i in 1 .. array_length(state_names,1) loop
-        if normalized_deal_state = state_names[i] then
-          normalized_deal_state := state_abbrevs[i];
+        if normalized_state = state_names[i] then
+          normalized_state := state_abbrevs[i];
           exit;
         end if;
       end loop;
     end if;
-    normalized_deal_state := lower(normalized_deal_state);
+    normalized_state := lower(normalized_state);
   end if;
 
-  -- Convert any full state names in the program’s states array to abbreviations.
+  -- Convert any full state names in the target states array to abbreviations.
   if array_length(v_states,1) is not null then
     for i in 1 .. array_length(v_states,1) loop
       if v_states[i] is not null and char_length(v_states[i]) > 2 then
@@ -110,23 +121,30 @@ begin
     end loop;
   end if;
 
-  -- State match.
-  if normalized_deal_state is not null and normalized_deal_state <> '' then
-    if normalized_deal_state = any(v_states) then
+  -- Check for a state match.
+  if normalized_state is not null and normalized_state <> '' then
+    if normalized_state = any(v_states) then
       return true;
     end if;
   end if;
 
-  -- County match.
+  -- Check for a county match.
   if d_state_county is not null and d_state_county <> '' then
     if lower(d_state_county) = any(v_counties) then
       return true;
     end if;
   end if;
 
-  -- Metro (city) match.
+  -- Check for a city match.
   if d_city_town_village_locality is not null and d_city_town_village_locality <> '' then
-    if lower(d_city_town_village_locality) = any(v_metros) then
+    if lower(d_city_town_village_locality) = any(v_cities) then
+      return true;
+    end if;
+  end if;
+
+  -- Check for a zip code match.
+  if d_zip_code is not null and d_zip_code <> '' then
+    if lower(d_zip_code) = any(v_zip_codes) then
       return true;
     end if;
   end if;
@@ -134,32 +152,3 @@ begin
   return false;
 end;
 $$;
-
-SELECT public.location_matches_exact_split(
-  'Sulphur',          -- city
-  'Texas',            -- region (state)
-  'Calcasieu Parish', -- county
-  '[{
-    "states": [
-      "NJ","NY","PA","CT","DE","MD","MA","TX"
-    ]
-  }]'::jsonb
-);
-
-SELECT public.location_matches_exact_split(
-  'Sulphur',
-  'Texas',
-  'Calcasieu Parish',
-  '[{
-    "states": [
-      "NJ",
-      "NY",
-      "PA",
-      "CT",
-      "DE",
-      "MD",
-      "MA",
-      "TX"
-    ]}]'::jsonb
-);
--- should return true
