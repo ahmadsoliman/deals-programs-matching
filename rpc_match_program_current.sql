@@ -15,9 +15,11 @@ returns table (
   organization_id       bigint,
   organization_name     text,
   organization_hq_location     text,
-  match_score           numeric,
+  match_score           integer,
   matched               boolean,
   match_reasons         jsonb,
+  d_asset_type          text[],  -- from deal
+  p_program_asset_types text[],  -- from program
   recourse              text,
   typical_amortization  text[],
   minimum_check_size    numeric,
@@ -30,6 +32,7 @@ language sql
 SECURITY DEFINER
 stable
 as $$
+
 with
 -- load the deal
 deal as (
@@ -66,11 +69,11 @@ candidates as (
     coalesce(p.transaction_types, ARRAY[]::text[])          as p_transaction_types,
     coalesce(p.target_property_locations, '{}'::jsonb) as p_target_property_locations,
     (
-      select array_agg(at.name)
-      from program_asset_types pat
-      join asset_types at on pat.asset_type_id = at.id
+      SELECT coalesce(array_agg(at.name)::text[], ARRAY[]::text[])
+      FROM program_asset_types pat
+      JOIN asset_types at ON pat.asset_type_id = at.id
       where pat.program_id = p.id
-    ) as p_program_asset_types,
+    )                                                       as p_program_asset_types,
     p.investment_strategy                                   as p_investment_strategy,
     p.commercial_tenancy                                    as p_commercial_tenancy,
     p.hotel_flag_required                                   as p_hotel_flag_required,
@@ -89,24 +92,25 @@ candidates as (
     pe.extra as p_extra,
 
     -- deal fields (explicit aliases)
-    d.financing_type            as d_financing_type,          -- text[]
-    d.property_address          as d_property_address,
-    d.city_town_village_locality_of_property_address as d_city_town_village_locality_of_property_address,
-    d.state_county_of_property_address as d_state_county_of_property_address,
-    d.region_of_property_address as d_region_of_property_address,
-    d.asset_type                as d_asset_type,              -- text[]
-    d.investment_strategy       as d_investment_strategy,
-    d.tenancy                   as d_tenancy,
-    d.hotel_type                as d_hotel_type,
-    d.guarantor_type            as d_guarantor_type,
-    d.sponsor_location          as d_sponsor_location,
-    d.experience_level          as d_experience_level,
-    d.net_worth                 as d_net_worth,
-    d.value                     as d_value,
-    d.liquidity                 as d_liquidity,
-    d.assets_under_management   as d_assets_under_management,
-    d.credit_score              as d_credit_score,
-    d.us_citizenship            as d_us_citizenship,
+    coalesce(d.financing_type, ARRAY[]::text[])             as d_financing_type,  -- text[]
+    d.property_address                                      as d_property_address,
+    d.city_town_village_locality_of_property_address        as d_city_town_village_locality_of_property_address,
+    d.state_county_of_property_address                      as d_state_county_of_property_address,
+    d.region_of_property_address                            as d_region_of_property_address,
+    d.zip_postal_code_of_property_address                   as d_zip_postal_code_of_property_address,
+    coalesce(d.asset_type, ARRAY[]::text[])                 as d_asset_type,  -- text[]
+    d.investment_strategy                                   as d_investment_strategy,
+    d.tenancy                                               as d_tenancy,
+    d.hotel_type                                            as d_hotel_type,
+    d.guarantor_type                                         as d_guarantor_type,
+    d.sponsor_location                                      as d_sponsor_location,
+    d.experience_level                                      as d_experience_level,
+    d.net_worth                                             as d_net_worth,
+    d.value                                                 as d_value,
+    d.liquidity                                             as d_liquidity,
+    d.assets_under_management                               as d_assets_under_management,
+    d.credit_score                                          as d_credit_score,
+    d.us_citizenship                                        as d_us_citizenship,
 
     -- previously-defined UI filters
     f.recourse_filter,
@@ -130,6 +134,8 @@ results as (
     c.p_org_name             as organization_name,
     c.p_org_location         as organization_hq_location,
     c.p_recourse             as recourse,
+    c.d_asset_type           as d_asset_type,
+    c.p_program_asset_types  as p_program_asset_types,
     c.p_typical_amortization as typical_amortization,
     c.p_minimum_check_size   as minimum_check_size,
     c.p_maximum_check_size   as maximum_check_size,
@@ -142,8 +148,8 @@ results as (
     (
       (case when recourse_ok then 1 else 0 end)
     + (case when amortization_ok then 1 else 0 end)
-    + (case when fits_cltc and sizing_filter_provided then 1 else 0 end)
-    + (case when fits_tpe and sizing_filter_provided then 1 else 0 end)
+    + (case when (not sizing_filter_provided) or (fits_cltc and sizing_filter_provided) then 1 else 0 end)
+    + (case when (not sizing_filter_provided) or (fits_tpe and sizing_filter_provided) then 1 else 0 end)
 ----------------------- END of FILTERS, BEGIN RULES -----------------------
     + (case when sizing_ok then 1 else 0 end)
     + (case when financing_ok then 1 else 0 end)
@@ -161,7 +167,8 @@ results as (
     + (case when aum_ok then 1 else 0 end)
     + (case when credit_ok then 1 else 0 end)
     + (case when us_citizenship_ok then 1 else 0 end)
-    )::numeric as match_score,
+    -- 20.0  -- total number of boolean checks (adjust if you add/remove checks)
+    )::integer as match_score,
   -- final matched decision: must satisfy all boolean checks below (plus recourse/amortization)
     (
       recourse_ok
@@ -170,6 +177,7 @@ results as (
         (not sizing_filter_provided) OR (fits_cltc OR fits_tpe)
       )
 ----------------------- END of FILTERS, BEGIN RULES -----------------------
+      and sizing_ok
       and financing_ok
       and location_ok
       and asset_type_ok
@@ -186,28 +194,34 @@ results as (
       and credit_ok
       and us_citizenship_ok
     ) as matched,
+
   -- structured reasons: each boolean below is spelled out for the UI
-    jsonb_build_object(
-      'recourse_ok',             recourse_ok,
-      'amortization_ok',         amortization_ok,
-      'fits_cltc',               fits_cltc,
-      'fits_tpe',                fits_tpe,
------------------------ END of FILTERS, BEGIN RULES -----------------------
-      'financing_ok',            financing_ok,
-      'location_ok',             location_ok,
-      'asset_type_ok',           asset_type_ok,
-      'investment_strategy_ok',  investment_strategy_ok,
-      'tenancy_ok',              tenancy_ok,
-      'hotel_ok',                hotel_ok,
-      'guarantor_ok',            guarantor_ok,
-      'sponsor_location_ok',     sponsor_location_ok,
-      'experience_ok',           experience_ok,
-      'net_worth_ok',            net_worth_ok,
-      'liquidity_ok',            liquidity_ok,
-      'liquidity_ratio_ok',      liquidity_ratio_ok,
-      'aum_ok',                  aum_ok,
-      'credit_ok',               credit_ok,
-      'us_citizenship_ok',       us_citizenship_ok
+    (select jsonb_object_agg(key, value)
+      from (
+             values
+             ('recourse_ok',             recourse_ok),
+             ('amortization_ok',         amortization_ok),
+             ('sizing_filter_provided',  sizing_filter_provided),
+             ('fits_cltc',               fits_cltc or not sizing_filter_provided),
+             ('fits_tpe',                fits_tpe or not sizing_filter_provided),
+             ('sizing_ok',               sizing_ok),
+             ('financing_ok',            financing_ok),
+             ('location_ok',             location_ok),
+             ('asset_type_ok',           asset_type_ok),
+             ('investment_strategy_ok',  investment_strategy_ok),
+             ('tenancy_ok',              tenancy_ok),
+             ('hotel_ok',                hotel_ok),
+             ('guarantor_ok',            guarantor_ok),
+             ('sponsor_location_ok',     sponsor_location_ok),
+             ('experience_ok',           experience_ok),
+             ('net_worth_ok',            net_worth_ok),
+             ('liquidity_ok',            liquidity_ok),
+             ('liquidity_ratio_ok',      liquidity_ratio_ok),
+             ('aum_ok',                  aum_ok),
+             ('credit_ok',               credit_ok),
+             ('us_citizenship_ok',       us_citizenship_ok)
+           ) as t(key, value)
+      where value <> true
     ) as match_reasons
 
   from (
@@ -280,15 +294,16 @@ results as (
     -- property location: if program target list empty -> match, otherwise check via fuzzy match or substring
     location_matches_exact_split(
         d_city_town_village_locality_of_property_address,
-        d_state_county_of_property_address,
         d_region_of_property_address,
+        d_state_county_of_property_address,
+        d_zip_postal_code_of_property_address,
         p_target_property_locations
-    ) as location_ok,
+    ) AS location_ok,
 
     -- asset type: this is actually a many-to-many link table in program_asset_types table
     -- asset_type: program empty => match, otherwise any overlap
     (
-      (array_length(coalesce(p_program_asset_types, ARRAY[]::text[]),1) = 0)
+      (cardinality(coalesce(p_program_asset_types, ARRAY[]::text[])) = 0)
       OR (coalesce(d_asset_type, ARRAY[]::text[]) && coalesce(p_program_asset_types, ARRAY[]::text[]))
     ) as asset_type_ok,
     
@@ -372,7 +387,7 @@ results as (
 
     -- US citizenship: if deal.us_citizenship = false then program must not require US citizenship
       (
-        (d_us_citizenship IS NULL) -- deal not specified -> OK
+        (d_us_citizenship IS NULL OR coalesce(p_us_citizenship_required, false) = false) -- deal not specified -> OK
         OR (d_us_citizenship::boolean = false AND coalesce(p_us_citizenship_required, false) = false)
       ) as us_citizenship_ok
 
@@ -434,6 +449,8 @@ select
   match_score,
   matched,
   match_reasons,
+  d_asset_type,
+  p_program_asset_types,
   recourse,
   typical_amortization,
   minimum_check_size,
@@ -452,23 +469,6 @@ order by
 limit p_limit offset p_offset;
 $$;
 
-select
-  *
-from
-  rpc_match_programs (3);
-
-select
-  *
-from
-  rpc_match_programs (
-    p_deal_id := 39,
-    p_filters := '{}'::jsonb,
-    p_sort_by := 'updated',
-    p_match_only := false,
-    p_limit := 15,
-    p_offset := 0
-  );
-
 select * from rpc_match_programs(34);
 
 -- select * 
@@ -479,7 +479,3 @@ select * from rpc_match_programs(34);
 --   p_match_only := true,
 --   p_limit := 1000
 -- );
-
-
--- -- Enable pg_trgm if it’s not already installed (run once)
--- CREATE EXTENSION IF NOT EXISTS pg_trgm;
