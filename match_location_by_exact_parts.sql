@@ -90,9 +90,6 @@ declare
   normalized_state text;
 
 begin
-  RAISE NOTICE 'JSON value: %', p_target_locs::text;
-  RAISE NOTICE 'States array: %', v_states::text;
-  RAISE NOTICE 'States array Len: %', cardinality(coalesce(v_states, array[]::text[]));
 
   -- If no target location filters are provided, always match.
   if p_target_locs is null or p_target_locs = 'null'::jsonb
