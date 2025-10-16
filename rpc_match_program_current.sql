@@ -98,12 +98,16 @@ candidates as (
     d.state_county_of_property_address                      as d_state_county_of_property_address,
     d.region_of_property_address                            as d_region_of_property_address,
     d.zip_postal_code_of_property_address                   as d_zip_postal_code_of_property_address,
+    d.sponsor_location                                      as d_sponsor_location,
+    d.city_town_village_locality_of_sponsor_location        as d_city_town_village_locality_of_sponsor_location,
+    d.state_county_of_sponsor_location                      as d_state_county_of_sponsor_location,
+    d.region_of_sponsor_location                            as d_region_of_sponsor_location,
+    d.zip_postal_code_of_sponsor_location                   as d_zip_postal_code_of_sponsor_location,
     coalesce(d.asset_type, ARRAY[]::text[])                 as d_asset_type,  -- text[]
     d.investment_strategy                                   as d_investment_strategy,
     d.tenancy                                               as d_tenancy,
     d.hotel_type                                            as d_hotel_type,
-    d.guarantor_type                                         as d_guarantor_type,
-    d.sponsor_location                                      as d_sponsor_location,
+    d.guarantor_type                                        as d_guarantor_type,
     d.experience_level                                      as d_experience_level,
     d.net_worth                                             as d_net_worth,
     d.value                                                 as d_value,
@@ -340,13 +344,21 @@ results as (
 
     -- sponsor location: if program blank => match, else check sponsor city/county/state against sponsor_location_req
       (
-        (p_sponsor_location_req IS NULL OR p_sponsor_location_req = '')
+        (d_sponsor_location IS NULL OR trim(d_sponsor_location) = '')
+        OR (p_sponsor_location_req IS NULL)
         OR
-          (COALESCE(
-            (
-              similarity(lower(d_sponsor_location), lower(p_sponsor_location_req)) >= 0.8
-            ), false)
+          location_matches_exact_split(
+              d_city_town_village_locality_of_sponsor_location,
+              d_region_of_sponsor_location,
+              d_state_county_of_sponsor_location,
+              d_zip_postal_code_of_sponsor_location,
+              p_sponsor_location_req
           )
+          -- (COALESCE(
+          --   (
+          --     similarity(lower(d_sponsor_location), lower(p_sponsor_location_req)) >= 0.8
+          --   ), false)
+          -- )
       ) as sponsor_location_ok,
 
     -- experience level: if program blank => match, if deal blank => match, else exact match
