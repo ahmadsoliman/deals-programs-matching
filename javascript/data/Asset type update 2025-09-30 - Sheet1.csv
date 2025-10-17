@@ -1,0 +1,27 @@
+CPD Value,Supabase Value,Supabase Parent Value
+Apartments,Apartments,Multifamily
+Senior Housing,Senior-Restricted Housing,Multifamily
+Short Term Housing,Short-Term Housing,Hospitality
+Assisted Living,Assisted Living,Multifamily
+Condos,Condominiums,Multifamily
+SFR Portfolio,Single-Family Rentals/Build to Rent,Multifamily
+Student Housing,Student Housing,Multifamily
+Co-living,Coliving,Multifamily
+Lt Industrial,Warehouse/Logistics,Industrial
+Self-storage,Self-Storage,Storage
+Land,Raw Land,Land
+Hotel,Hotel,Hospitality
+Hospital,Hospital,Other
+Medical Office,Medical Office,Office
+1-4 Unit Rental,Single-Family Homes,Residential
+Data Center,Data Centers,Industrial
+Religious,Churches,Religious
+Hospitality,"Dude Ranches, Hotel, Resort, Short-Term Housing",Hospitality
+Other,"Funeral Homes, Gun Ranges, Event Venues, Cell Tower Leases, Fixed-Base Operators, Infrastructure, Marinas, Hospital",Other
+Office,"Managed Office, Urban Office, Suburban Office, Medical Office, Life Science",Office
+Retail,"Grocery-anchored Retail, Malls, Standalone Retail",Retail
+Industrial,"Biomanufacturing Plants, Film Studios, Industrial Outdoor Storage/Truck Parking, Warehouse/Logistics",Industrial
+Cannabis,Dispensaries,Retail
+Mobile Home Park,Manufactured Housing,Multifamily
+RV Parks,RV Park,Hospitality
+Manufacturing,Manufacturing,Industrial

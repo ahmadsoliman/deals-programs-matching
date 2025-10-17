@@ -1,0 +1,99 @@
+{
+  "Apartments": [
+    "Apartments"
+  ],
+  "Senior Housing": [
+    "Senior-Restricted Housing"
+  ],
+  "Short Term Housing": [
+    "Short-Term Housing"
+  ],
+  "Assisted Living": [
+    "Assisted Living"
+  ],
+  "Condos": [
+    "Condominiums"
+  ],
+  "SFR Portfolio": [
+    "Single-Family Rentals/Build to Rent"
+  ],
+  "Student Housing": [
+    "Student Housing"
+  ],
+  "Co-living": [
+    "Coliving"
+  ],
+  "Lt Industrial": [
+    "Warehouse/Logistics"
+  ],
+  "Self-storage": [
+    "Self-Storage"
+  ],
+  "Land": [
+    "Raw Land"
+  ],
+  "Hotel": [
+    "Hotel"
+  ],
+  "Hospital": [
+    "Hospital"
+  ],
+  "Medical Office": [
+    "Medical Office"
+  ],
+  "1-4 Unit Rental": [
+    "Single-Family Homes"
+  ],
+  "Data Center": [
+    "Data Centers"
+  ],
+  "Religious": [
+    "Churches"
+  ],
+  "Hospitality": [
+    "Dude Ranches",
+    "Hotel",
+    "Resort",
+    "Short-Term Housing"
+  ],
+  "Other": [
+    "Funeral Homes",
+    "Gun Ranges",
+    "Event Venues",
+    "Cell Tower Leases",
+    "Fixed-Base Operators",
+    "Infrastructure",
+    "Marinas",
+    "Hospital"
+  ],
+  "Office": [
+    "Managed Office",
+    "Urban Office",
+    "Suburban Office",
+    "Medical Office",
+    "Life Science"
+  ],
+  "Retail": [
+    "Grocery-anchored Retail",
+    "Malls",
+    "Standalone Retail"
+  ],
+  "Industrial": [
+    "Biomanufacturing Plants",
+    "Film Studios",
+    "Industrial Outdoor Storage/Truck Parking",
+    "Warehouse/Logistics"
+  ],
+  "Cannabis": [
+    "Dispensaries"
+  ],
+  "Mobile Home Park": [
+    "Manufactured Housing"
+  ],
+  "RV Parks": [
+    "RV Park"
+  ],
+  "Manufacturing": [
+    "Manufacturing"
+  ]
+}

@@ -1,0 +1,36 @@
+{
+  "name": "javascript",
+  "version": "1.0.0",
+  "description": "Simple TypeScript project: fast run/test/build with minimal typing constraints",
+  "type": "module",
+  "main": "dist/index.js",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "start": "tsx src/index.ts",
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc -p tsconfig.json",
+    "test": "vitest",
+    "test:run": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "csv:print": "tsx src/scripts/csv_print.ts data/people.csv",
+    "csv:select": "tsx src/scripts/csv_select.ts data/people.csv name,city",
+    "csv:filter": "tsx src/scripts/csv_filter.ts data/people.csv city=Paris",
+    "csv:ndjson": "tsx src/scripts/csv_to_ndjson.ts data/people.csv",
+    "csv:asset": "tsx src/scripts/load_asset_update.ts",
+    "csv:asset:map": "tsx src/scripts/build_asset_map.ts"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "devDependencies": {
+    "@types/node": "^24.8.0",
+    "tsx": "^4.20.6",
+    "typescript": "^5.9.3",
+    "vitest": "^3.2.4"
+  },
+  "dependencies": {
+    "csv-parse": "^6.1.0"
+  }
+}
