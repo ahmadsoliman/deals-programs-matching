@@ -30,7 +30,9 @@
     "Self-Storage"
   ],
   "Land": [
-    "Raw Land"
+    "Raw Land",
+    "Timberland",
+    "Entitled Land"
   ],
   "Hotel": [
     "Hotel"

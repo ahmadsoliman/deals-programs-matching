@@ -5,7 +5,7 @@
 create or replace function rpc_match_programs_v2(
   p_deal_id bigint,
   p_filters jsonb default '{}'::jsonb,   -- UI filters (recourse, amortization, cltc_pct, tpe_pct, etc.)
-  p_sort_by text default 'updated',      -- 'updated'|'score'|'check_size'|'soft_spot'
+  p_sort_by text default 'updated',      -- 'updated'|'rate'|'score'|'check_size'|'soft_spot'
   p_match_only boolean default true,     -- if true, only return programs that fully match all criteria; if false, return all candidates with match score
   p_limit int default 100,
   p_offset int default 0
@@ -145,13 +145,10 @@ candidates as (
     d.guarantor_type                                        as d_guarantor_type,
     d.experience_level                                      as d_experience_level,
     d.net_worth                                             as d_net_worth,
-    d.net_worth_num                                         as d_net_worth_num,
     d.value                                                 as d_value,
     d.liquidity                                             as d_liquidity,
-    d.liquidity_num                                         as d_liquidity_num,
     d.assets_under_management                               as d_assets_under_management,
     d.credit_score                                          as d_credit_score,
-    d.credit_score_num                                      as d_credit_score_num,
     d.us_citizenship                                        as d_us_citizenship,
 
     -- previously-defined UI filters
@@ -168,8 +165,8 @@ candidates as (
   cross join filters f
 ),
 
--- compute booleans and match_score as before, in a raw_results CTE
-raw_results as (
+-- compute booleans and match_score as before, in a results CTE
+results as (
   select
     c.p_id                   as program_id,
     c.p_name                 as program_name,
@@ -269,7 +266,7 @@ raw_results as (
 
     -- [v2 change] Provide computed helper values for sorting (not exposed in result set)
     -- check_size_diff: distance from deal value to program range center (smaller is better)
-    -- soft_spot_score is computed in the next CTE so it can reference the matched alias safely
+    -- soft_spot_score: a simple heuristic for now (matched weight + score weight + recency weight)
     -- These are used only in ORDER BY below.
     (case
        when c.p_minimum_check_size is null and c.p_maximum_check_size is null then null
@@ -277,6 +274,11 @@ raw_results as (
        when c.p_maximum_check_size is null then abs(coalesce(c.d_value,0) - c.p_minimum_check_size)
        else abs(coalesce(c.d_value,0) - ((c.p_minimum_check_size + c.p_maximum_check_size)/2.0))
      end) as check_size_diff,
+    (
+      (case when (recency_rank <= 100) then 1 else 0 end) -- helper notion of recency; see below
+      + (case when matched then 2 else 0 end)
+      + least(match_score, 20) * 0.05
+    )::numeric as soft_spot_score,
     recency_rank
   from (
     -- inner-most: compute every boolean as in your previous implementation
@@ -369,6 +371,7 @@ raw_results as (
     -- asset type: [v2 change] use ID-based overlap from deal_asset_types and program_asset_types
     (
       (cardinality(coalesce(c.p_program_asset_type_ids, ARRAY[]::int2[])) = 0)
+      OR (cardinality(coalesce(c.d_asset_type_ids, ARRAY[]::int2[])) = 0)
       OR (coalesce(c.d_asset_type_ids, ARRAY[]::int2[]) && coalesce(c.p_program_asset_type_ids, ARRAY[]::int2[]))
     ) as asset_type_ok,
 
@@ -423,53 +426,46 @@ raw_results as (
         OR (c.p_sponsor_experience_level = c.d_experience_level)
       ) as experience_ok,
 
-    -- net worth: if deal.net_worth is unknown => match. Else enforce absolute and ratio requirements without forcing 0 defaults.
+    -- net worth: if deal.net_worth is null => match. Else enforce both absolute and ratio if program requires them.
+      -- [v2 change] Avoid defaulting parse to 0; treat unknowns permissively explicitly
       (
-        (c.d_net_worth_num IS NULL)
+        (c.d_net_worth IS NULL)
           OR (
-            (c.p_min_net_worth IS NULL OR (c.d_net_worth_num >= c.p_min_net_worth))
+            (c.p_min_net_worth IS NULL OR (parse_money_to_numeric(c.d_net_worth) >= c.p_min_net_worth))
             AND (
               c.p_min_net_worth_ratio IS NULL
-              OR parse_money_to_numeric(c.p_min_net_worth_ratio) IS NULL
               OR (
-                c.d_value IS NOT NULL
-                AND (c.d_net_worth_num * c.d_value) >= parse_money_to_numeric(c.p_min_net_worth_ratio)
+                parse_money_to_numeric(c.d_net_worth) IS NOT NULL
+                AND c.d_value IS NOT NULL
+                AND (parse_money_to_numeric(c.d_net_worth) * c.d_value) >= coalesce(parse_money_to_numeric(c.p_min_net_worth_ratio), 0)
               )
             )
           )
       ) as net_worth_ok,
 
-    -- liquidity absolute: unknown deal liquidity passes; otherwise require numeric deal liquidity above program minimum.
+    -- liquidity absolute: if either side null => match, else require liquidity > min
       (
-        (c.d_liquidity_num IS NULL)
-        OR (c.p_min_liquidity IS NULL)
-        OR (c.d_liquidity_num > c.p_min_liquidity)
+        (c.d_liquidity IS NULL) OR (c.p_min_liquidity IS NULL) OR (parse_money_to_numeric(c.d_liquidity) > c.p_min_liquidity)
       ) as liquidity_ok,
 
-    -- liquidity ratio: require both parsed deal liquidity and ratio requirement to be present before comparing.
+    -- liquidity ratio: if either side null => match, else require liquidity * value > min ratio
       (
-        (c.d_liquidity_num IS NULL)
-        OR (c.p_min_liquidity_ratio IS NULL)
-        OR parse_money_to_numeric(c.p_min_liquidity_ratio) IS NULL
+        (c.d_liquidity IS NULL) OR (c.p_min_liquidity_ratio IS NULL)
         OR (
-          c.d_value IS NOT NULL
-          AND (c.d_liquidity_num * c.d_value) > parse_money_to_numeric(c.p_min_liquidity_ratio)
+          parse_money_to_numeric(c.d_liquidity) IS NOT NULL
+          AND c.d_value IS NOT NULL
+          AND (parse_money_to_numeric(c.d_liquidity) * c.d_value) > coalesce(parse_money_to_numeric(c.p_min_liquidity_ratio), 0)
         )
       ) as liquidity_ratio_ok,
 
     -- assets under management (AUM)
       (
-        (c.d_assets_under_management IS NULL)
-        OR (c.p_sponsor_aum_req IS NULL)
-        OR parse_money_to_numeric(c.p_sponsor_aum_req) IS NULL
-        OR (c.d_assets_under_management > parse_money_to_numeric(c.p_sponsor_aum_req))
+        (c.d_assets_under_management IS NULL) OR (c.p_sponsor_aum_req IS NULL) OR (c.d_assets_under_management > coalesce(parse_money_to_numeric(c.p_sponsor_aum_req), 0))
       ) as aum_ok,
 
-    -- credit score: use normalized numeric column; unknown values remain permissive
+    -- credit score: if deal null => match; else require >= min_credit_score if set
       (
-        (c.d_credit_score_num IS NULL)
-        OR (c.p_min_credit_score IS NULL)
-        OR (c.d_credit_score_num >= c.p_min_credit_score)
+        (c.d_credit_score IS NULL) OR (c.p_min_credit_score IS NULL) OR (parse_money_to_numeric(c.d_credit_score) >= c.p_min_credit_score)
       ) as credit_ok,
 
     -- US citizenship: [v2 change] permissive when unknown (deal NULL => ok);
@@ -481,7 +477,7 @@ raw_results as (
       ) as us_citizenship_ok
 
     from candidates c
-) c
+  ) c
   where
   -- only return programs that satisfy the filtering boolean set (you can remove this WHERE to return near-misses)
     (
@@ -510,18 +506,6 @@ raw_results as (
       and c.us_citizenship_ok
     )
     or (not p_match_only) -- if p_match_only is false, return all candidates
-),
-
--- derive soft_spot_score now that matched/match_score aliases are available
-results as (
-  select
-    rr.*,
-    (
-      (case when (rr.recency_rank <= 100) then 1 else 0 end)
-      + (case when rr.matched then 2 else 0 end)
-      + least(rr.match_score, 20) * 0.05
-    )::numeric as soft_spot_score
-  from raw_results rr
 ),
 
 -- Rank per organization and pick the top 1 program for each organization.
@@ -581,19 +565,6 @@ order by
   program_id
 limit p_limit offset p_offset;
 $$;
-
-
--- select * from rpc_match_programs(34);
-
--- select * 
--- from rpc_match_programs(
---   p_deal_id := 26,
---   p_filters := NULL, --'{"recourse":["Non-Recourse"],"amortization":"25"}',
---   p_sort_by := 'updated',
---   p_match_only := true,
---   p_limit := 1000
--- );
-
 
 
 -- -- Deal-side numeric normalizations
