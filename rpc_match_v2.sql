@@ -1,11 +1,8 @@
--- v2: safe, backward-compatible variant of rpc_match_programs with improved null/empty handling,
--- asset_type id-based matching, open-ended sizing constraints, US citizenship permissive when unknown,
--- amortization/recourse edge cases, parsing guards, and p_sort_by implementation.
--- Original comments and structure retained; changes are annotated with -- [v2 change: ...]
-create or replace function rpc_match_programs_v2(
+
+create or replace function rpc_match_programs(
   p_deal_id bigint,
-  p_filters jsonb default '{}'::jsonb,   -- UI filters (recourse, amortization, cltc_pct, tpe_pct, etc.)
-  p_sort_by text default 'updated',      -- 'updated'|'rate'|'score'|'check_size'|'soft_spot'
+  p_filters jsonb default '{}'::jsonb,   -- UI filters (recourse, amortization, capital stack sliders, etc.)
+  p_sort_by text default 'updated',      -- 'updated'|'score'|'check_size'|'soft_spot'
   p_match_only boolean default true,     -- if true, only return programs that fully match all criteria; if false, return all candidates with match score
   p_limit int default 100,
   p_offset int default 0
@@ -37,7 +34,6 @@ as $$
    - [v2 change] Robust handling of NULL/empty filters and program values (sizing, amortization, LTC, etc.)
    - [v2 change] Asset type matching now uses asset_types IDs via deal_asset_types and program_asset_types (no string matching)
    - [v2 change] Sizing comparisons are open-ended when program min/max are NULL (ignore missing bound)
-   - [v2 change] CLTC checks treat NULL p_maximum_ltc as no limit
    - [v2 change] US citizenship logic is permissive when unknown
    - [v2 change] Money parsing avoids forcing 0 on parse failures; use permissive logic explicitly
    - [v2 change] Implement p_sort_by: 'updated' (default), 'score', 'check_size', and 'soft_spot' (starter heuristic)
@@ -62,8 +58,24 @@ filters as (
   select
     (pf -> 'recourse')::jsonb                         as recourse_filter_json,   -- may be array or null
     (pf ->> 'amortization')                           as amortization_filter,
-    nullif(trim(coalesce(pf ->> 'cltc_pct', '')), '')::numeric  as cltc_pct,  -- fraction, e.g. 0.25
-    nullif(trim(coalesce(pf ->> 'tpe_pct', '')), '')::numeric   as tpe_pct
+    -- [v3 change] New capital stack slider inputs (percentages as integers, e.g. 46 = 46%)
+    nullif(trim(coalesce(pf ->> 'Senior_input', '')), '')::numeric       as senior_pct,
+    nullif(trim(coalesce(pf ->> 'Subordinate_input', '')), '')::numeric  as subordinate_pct,
+    nullif(trim(coalesce(pf ->> 'Equity_input', '')), '')::numeric       as equity_pct,
+    -- [v3 change] Toggle flags for each capital stack type
+    coalesce((pf ->> 'Senior_toggle')::boolean, false)      as senior_toggle,
+    coalesce((pf ->> 'Subordinate_toggle')::boolean, false) as subordinate_toggle,
+    coalesce((pf ->> 'Equity_toggle')::boolean, false)      as equity_toggle,
+    -- [v3 change] Checkbox flags for specific capital stack types
+    -- Each checkbox is independently controllable; if not provided, defaults to false
+    coalesce((pf ->> 'Senior_Line_of_Credit_checkbox')::boolean, false) as senior_loc_cb,
+    coalesce((pf ->> 'Senior_Senior_Commercial_Mortgage_checkbox')::boolean, false) as senior_scm_cb,
+    coalesce((pf ->> 'Subordinate_Mezzanine_checkbox')::boolean, false) as sub_mezz_cb,
+    coalesce((pf ->> 'Subordinate_Preferred_Equity_checkbox')::boolean, false) as sub_pref_cb,
+    coalesce((pf ->> 'Equity_Co-GP_Equity_checkbox')::boolean, false) as eq_cogp_cb,
+    coalesce((pf ->> 'Equity_LP_Equity_checkbox')::boolean, false) as eq_lp_cb,
+    coalesce((pf ->> 'Equity_PACE_checkbox')::boolean, false) as eq_pace_cb,
+    coalesce((pf ->> 'Equity_Ground_Lease_Buyer_checkbox')::boolean, false) as eq_glb_cb
   from params
 ),
 
@@ -145,18 +157,35 @@ candidates as (
     d.guarantor_type                                        as d_guarantor_type,
     d.experience_level                                      as d_experience_level,
     d.net_worth                                             as d_net_worth,
+    d.net_worth_num                                         as d_net_worth_num,
     d.value                                                 as d_value,
+    d.project_budget                                        as d_project_budget,
     d.liquidity                                             as d_liquidity,
+    d.liquidity_num                                         as d_liquidity_num,
     d.assets_under_management                               as d_assets_under_management,
     d.credit_score                                          as d_credit_score,
+    d.credit_score_num                                      as d_credit_score_num,
     d.us_citizenship                                        as d_us_citizenship,
 
     -- previously-defined UI filters
     -- [v2 change] Keep JSON for recourse so we can detect empty array vs null
     f.recourse_filter_json,
     f.amortization_filter,
-    f.cltc_pct,
-    f.tpe_pct
+    -- [v3 change] New capital stack filter values
+    f.senior_pct,
+    f.subordinate_pct,
+    f.equity_pct,
+    f.senior_toggle,
+    f.subordinate_toggle,
+    f.equity_toggle,
+    f.senior_loc_cb,
+    f.senior_scm_cb,
+    f.sub_mezz_cb,
+    f.sub_pref_cb,
+    f.eq_cogp_cb,
+    f.eq_lp_cb,
+    f.eq_pace_cb,
+    f.eq_glb_cb
 
   from programs p
   left join organizations o on p.organization_id = o.id
@@ -165,8 +194,8 @@ candidates as (
   cross join filters f
 ),
 
--- compute booleans and match_score as before, in a results CTE
-results as (
+-- compute booleans and match_score as before, in a raw_results CTE
+raw_results as (
   select
     c.p_id                   as program_id,
     c.p_name                 as program_name,
@@ -188,8 +217,10 @@ results as (
     (
       (case when recourse_ok then 1 else 0 end)
     + (case when amortization_ok then 1 else 0 end)
-    + (case when (not sizing_filter_provided) or (fits_cltc and sizing_filter_provided) then 1 else 0 end)
-    + (case when (not sizing_filter_provided) or (fits_tpe and sizing_filter_provided) then 1 else 0 end)
+    -- [v3 change] Updated to use new capital stack filters (Senior, Subordinate, Equity)
+    + (case when (not sizing_filter_provided) or (coalesce(fits_senior,false) and sizing_filter_provided) then 1 else 0 end)
+    + (case when (not sizing_filter_provided) or (coalesce(fits_subordinate,false) and sizing_filter_provided) then 1 else 0 end)
+    + (case when (not sizing_filter_provided) or (coalesce(fits_equity,false) and sizing_filter_provided) then 1 else 0 end)
 ----------------------- END of FILTERS, BEGIN RULES -----------------------
     + (case when sizing_ok then 1 else 0 end)
     + (case when financing_ok then 1 else 0 end)
@@ -207,16 +238,17 @@ results as (
     + (case when aum_ok then 1 else 0 end)
     + (case when credit_ok then 1 else 0 end)
     + (case when us_citizenship_ok then 1 else 0 end)
-    -- 20.0  -- total number of boolean checks (adjust if you add/remove checks)
+    -- 21.0  -- total number of boolean checks (now 3 capital stack filters + 18 other checks)
     )::integer as match_score,
   -- final matched decision: must satisfy all boolean checks below (plus recourse/amortization)
     (
       recourse_ok
       and amortization_ok
       and (
-        (not sizing_filter_provided) OR (fits_cltc OR fits_tpe)
+        -- [v3 change] A program matches if it matches ANY of the enabled capital stack types
+        (not sizing_filter_provided) OR (coalesce(fits_senior,false) OR coalesce(fits_subordinate,false) OR coalesce(fits_equity,false))
       )
------------------------ END of FILTERS, BEGIN RULES -----------------------
+----------------------- END OF FILTERS, BEGIN RULES -----------------------
       and sizing_ok
       and financing_ok
       and location_ok
@@ -242,8 +274,11 @@ results as (
              ('recourse_ok',             recourse_ok),
              ('amortization_ok',         amortization_ok),
              ('sizing_filter_provided',  sizing_filter_provided),
-             ('fits_cltc',               fits_cltc or not sizing_filter_provided),
-             ('fits_tpe',                fits_tpe or not sizing_filter_provided),
+             ('capital_stack_ok',        (not sizing_filter_provided) OR (coalesce(fits_senior,false) OR coalesce(fits_subordinate,false) OR coalesce(fits_equity,false))),
+             -- Show fits_* as NULL when the corresponding toggle is off (instead of auto-true)
+             ('fits_senior',             case when senior_toggle then fits_senior else null end),
+             ('fits_subordinate',        case when subordinate_toggle then fits_subordinate else null end),
+             ('fits_equity',             case when equity_toggle then fits_equity else null end),
              ('sizing_ok',               sizing_ok),
              ('financing_ok',            financing_ok),
              ('location_ok',             location_ok),
@@ -266,19 +301,14 @@ results as (
 
     -- [v2 change] Provide computed helper values for sorting (not exposed in result set)
     -- check_size_diff: distance from deal value to program range center (smaller is better)
-    -- soft_spot_score: a simple heuristic for now (matched weight + score weight + recency weight)
+    -- soft_spot_score is computed in the next CTE so it can reference the matched alias safely
     -- These are used only in ORDER BY below.
     (case
        when c.p_minimum_check_size is null and c.p_maximum_check_size is null then null
-       when c.p_minimum_check_size is null then abs(coalesce(c.d_value,0) - c.p_maximum_check_size)
-       when c.p_maximum_check_size is null then abs(coalesce(c.d_value,0) - c.p_minimum_check_size)
-       else abs(coalesce(c.d_value,0) - ((c.p_minimum_check_size + c.p_maximum_check_size)/2.0))
+       when c.p_minimum_check_size is null then abs(coalesce(c.d_project_budget,0) - c.p_maximum_check_size)
+       when c.p_maximum_check_size is null then abs(coalesce(c.d_project_budget,0) - c.p_minimum_check_size)
+       else abs(coalesce(c.d_project_budget,0) - ((c.p_minimum_check_size + c.p_maximum_check_size)/2.0))
      end) as check_size_diff,
-    (
-      (case when (recency_rank <= 100) then 1 else 0 end) -- helper notion of recency; see below
-      + (case when matched then 2 else 0 end)
-      + least(match_score, 20) * 0.05
-    )::numeric as soft_spot_score,
     recency_rank
   from (
     -- inner-most: compute every boolean as in your previous implementation
@@ -316,40 +346,105 @@ results as (
          )
       end) as amortization_ok,
 
-    -- sizing: computed amounts and booleans
-      (coalesce(c.cltc_pct,0) * coalesce(c.d_value,0)) as calculated_cltc_amount,
-      (coalesce(c.tpe_pct,0)  * coalesce(c.d_value,0)) as calculated_tpe_amount,
+    -- [v3 change] New capital stack matching logic with toggles, checkboxes, and sliders
+    -- Calculate check amounts for each slider (percentage as fraction * deal value)
+      ((coalesce(c.senior_pct,0) / 100.0) * coalesce(c.d_project_budget,0)) as senior_check_amount,
+      ((coalesce(c.subordinate_pct,0) / 100.0) * coalesce(c.d_project_budget,0)) as subordinate_check_amount,
+      ((coalesce(c.equity_pct,0) / 100.0) * coalesce(c.d_project_budget,0)) as equity_check_amount,
 
-    -- whether user supplied any sizing filter
-      (c.cltc_pct IS NOT NULL OR c.tpe_pct IS NOT NULL) as sizing_filter_provided,
+    -- whether user supplied any capital stack filter (any toggle + at least one enabled checkbox)
+      (
+        (c.senior_toggle AND (c.senior_loc_cb OR c.senior_scm_cb))
+        OR (c.subordinate_toggle AND (c.sub_mezz_cb OR c.sub_pref_cb))
+        OR (c.equity_toggle AND (c.eq_cogp_cb OR c.eq_lp_cb OR c.eq_pace_cb OR c.eq_glb_cb))
+      ) as sizing_filter_provided,
 
-    -- fits within min/max check size (regardless of cltc/tpe)
+    -- [v3 change] fits within min/max check size (legacy sizing_ok for backward compatibility)
       -- [v2 change] Open-ended bounds: NULL program min/max means "ignore that bound"
-      ( (c.p_minimum_check_size IS NULL OR coalesce(c.d_value,0) >= c.p_minimum_check_size)
-        AND (c.p_maximum_check_size IS NULL OR coalesce(c.d_value,0) <= c.p_maximum_check_size)
+      ( (c.p_minimum_check_size IS NULL OR coalesce(c.d_project_budget,0) >= c.p_minimum_check_size)
+        AND (c.p_maximum_check_size IS NULL OR coalesce(c.d_project_budget,0) <= c.p_maximum_check_size)
       ) as sizing_ok,
 
-    -- fits CLTC if user provided a cltc_pct AND program has Senior AND check fits within min/max
-      (        
-        case when c.cltc_pct IS NULL then true
-          else (
-            ('Senior' = ANY(coalesce(c.p_capital_stack, ARRAY[]::text[])))
-            AND (c.p_maximum_check_size IS NULL OR (coalesce(c.cltc_pct, 0) * coalesce(c.d_value, 0)) <= c.p_maximum_check_size)
-            AND (c.p_minimum_check_size IS NULL OR (coalesce(c.cltc_pct, 0) * coalesce(c.d_value, 0)) >= c.p_minimum_check_size)
-            -- [v2 change] Treat NULL p_maximum_ltc as "no limit"
-            AND (c.p_maximum_ltc IS NULL OR coalesce(c.cltc_pct, 0) <= c.p_maximum_ltc)
-          )
-        end
-      ) as fits_cltc,
-
-    -- fits Third Party Equity if user provided tpe_pct AND program has Equity AND check fits
+    -- [v3 change] Senior capital stack matching
+    -- Match if: toggle is on AND at least one senior checkbox is on AND program has matching capital_stack
+    -- Sizing: if slider is 0/null, match all; otherwise check size constraints and LTC
       (
-        (c.tpe_pct IS NOT NULL)
-        AND ('Equity' = ANY(coalesce(c.p_capital_stack, ARRAY[]::text[])))
-        AND (c.p_maximum_check_size IS NULL OR (coalesce(c.tpe_pct,0)  * coalesce(c.d_value,0)) <= c.p_maximum_check_size)
-        AND (c.p_minimum_check_size IS NULL OR (coalesce(c.tpe_pct,0)  * coalesce(c.d_value,0)) >= c.p_minimum_check_size)
-      ) as fits_tpe,
+        CASE
+          -- If senior toggle is off, treat as not applicable (NULL) so it doesn't auto-pass the OR
+          WHEN NOT c.senior_toggle THEN NULL
+          -- If toggle is on but no checkboxes are checked, no match
+          WHEN NOT (c.senior_loc_cb OR c.senior_scm_cb) THEN false
+          -- Require at least one of the checked capital stack options to exist on the program
+          WHEN NOT (
+            (c.senior_loc_cb AND 'Line of Credit' = ANY(coalesce(c.p_capital_stack, ARRAY[]::text[])))
+            OR (c.senior_scm_cb AND 'Senior' = ANY(coalesce(c.p_capital_stack, ARRAY[]::text[])))
+          ) THEN false
+          ELSE (
+            -- If slider is 0 or null, match all (no size checking)
+            (c.senior_pct IS NULL OR c.senior_pct = 0)
+            OR (
+              -- Otherwise check size constraints and LTC (skip size checks when deal value missing)
+              (c.d_project_budget IS NULL
+                OR (
+                  (c.p_minimum_check_size IS NULL OR ((c.senior_pct / 100.0) * c.d_project_budget) >= c.p_minimum_check_size)
+                  AND (c.p_maximum_check_size IS NULL OR ((c.senior_pct / 100.0) * c.d_project_budget) <= c.p_maximum_check_size)
+                )
+              )
+              AND (c.p_maximum_ltc IS NULL OR (c.senior_pct / 100.0) <= c.p_maximum_ltc)
+            )
+          )
+        END
+      ) as fits_senior,
 
+    -- [v3 change] Subordinate capital stack matching
+      (
+        CASE
+          WHEN NOT c.subordinate_toggle THEN NULL
+          WHEN NOT (c.sub_mezz_cb OR c.sub_pref_cb) THEN false
+          -- Require at least one checked subordinate capital stack value on the program
+          WHEN NOT (
+            (c.sub_mezz_cb AND 'Mezzanine' = ANY(coalesce(c.p_capital_stack, ARRAY[]::text[])))
+            OR (c.sub_pref_cb AND 'Preferred Equity' = ANY(coalesce(c.p_capital_stack, ARRAY[]::text[])))
+          ) THEN false
+          ELSE (
+            (c.subordinate_pct IS NULL OR c.subordinate_pct = 0)
+            OR (
+              -- Otherwise enforce check size comparisons; skip size checks if deal value missing
+              c.d_project_budget IS NULL
+              OR (
+                (c.p_minimum_check_size IS NULL OR ((c.subordinate_pct / 100.0) * c.d_project_budget) >= c.p_minimum_check_size)
+                AND (c.p_maximum_check_size IS NULL OR ((c.subordinate_pct / 100.0) * c.d_project_budget) <= c.p_maximum_check_size)
+              )
+            )
+          )
+        END
+      ) as fits_subordinate,
+
+    -- [v3 change] Equity capital stack matching
+      (
+        CASE
+          WHEN NOT c.equity_toggle THEN NULL
+          WHEN NOT (c.eq_cogp_cb OR c.eq_lp_cb OR c.eq_pace_cb OR c.eq_glb_cb) THEN false
+          -- Require at least one checked equity capital stack value on the program
+          WHEN NOT (
+            (c.eq_cogp_cb AND 'Co-GP Equity' = ANY(coalesce(c.p_capital_stack, ARRAY[]::text[])))
+            OR (c.eq_lp_cb AND 'LP Equity' = ANY(coalesce(c.p_capital_stack, ARRAY[]::text[])))
+            OR (c.eq_pace_cb AND 'PACE' = ANY(coalesce(c.p_capital_stack, ARRAY[]::text[])))
+            OR (c.eq_glb_cb AND 'Ground Lease Buyer' = ANY(coalesce(c.p_capital_stack, ARRAY[]::text[])))
+          ) THEN false
+          ELSE (
+            (c.equity_pct IS NULL OR c.equity_pct = 0)
+            OR (
+              -- Otherwise enforce check size comparisons; skip size checks if deal value missing
+              c.d_project_budget IS NULL
+              OR (
+                (c.p_minimum_check_size IS NULL OR ((c.equity_pct / 100.0) * c.d_project_budget) >= c.p_minimum_check_size)
+                AND (c.p_maximum_check_size IS NULL OR ((c.equity_pct / 100.0) * c.d_project_budget) <= c.p_maximum_check_size)
+              )
+            )
+          )
+        END
+      ) as fits_equity,
 ----------------------- END of FILTERS, BEGIN RULES -----------------------
 
     -- financing_type: if p_transaction_types is empty or null, the program matches all financing types; otherwise, arrays must overlap
@@ -371,7 +466,6 @@ results as (
     -- asset type: [v2 change] use ID-based overlap from deal_asset_types and program_asset_types
     (
       (cardinality(coalesce(c.p_program_asset_type_ids, ARRAY[]::int2[])) = 0)
-      OR (cardinality(coalesce(c.d_asset_type_ids, ARRAY[]::int2[])) = 0)
       OR (coalesce(c.d_asset_type_ids, ARRAY[]::int2[]) && coalesce(c.p_program_asset_type_ids, ARRAY[]::int2[]))
     ) as asset_type_ok,
 
@@ -426,46 +520,53 @@ results as (
         OR (c.p_sponsor_experience_level = c.d_experience_level)
       ) as experience_ok,
 
-    -- net worth: if deal.net_worth is null => match. Else enforce both absolute and ratio if program requires them.
-      -- [v2 change] Avoid defaulting parse to 0; treat unknowns permissively explicitly
+    -- net worth: if deal.net_worth is unknown => match. Else enforce absolute and ratio requirements without forcing 0 defaults.
       (
-        (c.d_net_worth IS NULL)
+        (c.d_net_worth_num IS NULL)
           OR (
-            (c.p_min_net_worth IS NULL OR (parse_money_to_numeric(c.d_net_worth) >= c.p_min_net_worth))
+            (c.p_min_net_worth IS NULL OR (c.d_net_worth_num >= c.p_min_net_worth))
             AND (
               c.p_min_net_worth_ratio IS NULL
+              OR parse_money_to_numeric(c.p_min_net_worth_ratio) IS NULL
               OR (
-                parse_money_to_numeric(c.d_net_worth) IS NOT NULL
-                AND c.d_value IS NOT NULL
-                AND (parse_money_to_numeric(c.d_net_worth) * c.d_value) >= coalesce(parse_money_to_numeric(c.p_min_net_worth_ratio), 0)
+                c.d_project_budget IS NOT NULL
+                AND (c.d_net_worth_num * c.d_project_budget) >= parse_money_to_numeric(c.p_min_net_worth_ratio)
               )
             )
           )
       ) as net_worth_ok,
 
-    -- liquidity absolute: if either side null => match, else require liquidity > min
+    -- liquidity absolute: unknown deal liquidity passes; otherwise require numeric deal liquidity above program minimum.
       (
-        (c.d_liquidity IS NULL) OR (c.p_min_liquidity IS NULL) OR (parse_money_to_numeric(c.d_liquidity) > c.p_min_liquidity)
+        (c.d_liquidity_num IS NULL)
+        OR (c.p_min_liquidity IS NULL)
+        OR (c.d_liquidity_num > c.p_min_liquidity)
       ) as liquidity_ok,
 
-    -- liquidity ratio: if either side null => match, else require liquidity * value > min ratio
+    -- liquidity ratio: require both parsed deal liquidity and ratio requirement to be present before comparing.
       (
-        (c.d_liquidity IS NULL) OR (c.p_min_liquidity_ratio IS NULL)
+        (c.d_liquidity_num IS NULL)
+        OR (c.p_min_liquidity_ratio IS NULL)
+        OR parse_money_to_numeric(c.p_min_liquidity_ratio) IS NULL
         OR (
-          parse_money_to_numeric(c.d_liquidity) IS NOT NULL
-          AND c.d_value IS NOT NULL
-          AND (parse_money_to_numeric(c.d_liquidity) * c.d_value) > coalesce(parse_money_to_numeric(c.p_min_liquidity_ratio), 0)
+          c.d_project_budget IS NOT NULL
+          AND (c.d_liquidity_num * c.d_project_budget) > parse_money_to_numeric(c.p_min_liquidity_ratio)
         )
       ) as liquidity_ratio_ok,
 
     -- assets under management (AUM)
       (
-        (c.d_assets_under_management IS NULL) OR (c.p_sponsor_aum_req IS NULL) OR (c.d_assets_under_management > coalesce(parse_money_to_numeric(c.p_sponsor_aum_req), 0))
+        (c.d_assets_under_management IS NULL)
+        OR (c.p_sponsor_aum_req IS NULL)
+        OR parse_money_to_numeric(c.p_sponsor_aum_req) IS NULL
+        OR (c.d_assets_under_management > parse_money_to_numeric(c.p_sponsor_aum_req))
       ) as aum_ok,
 
-    -- credit score: if deal null => match; else require >= min_credit_score if set
+    -- credit score: use normalized numeric column; unknown values remain permissive
       (
-        (c.d_credit_score IS NULL) OR (c.p_min_credit_score IS NULL) OR (parse_money_to_numeric(c.d_credit_score) >= c.p_min_credit_score)
+        (c.d_credit_score_num IS NULL)
+        OR (c.p_min_credit_score IS NULL)
+        OR (c.d_credit_score_num >= c.p_min_credit_score)
       ) as credit_ok,
 
     -- US citizenship: [v2 change] permissive when unknown (deal NULL => ok);
@@ -477,15 +578,15 @@ results as (
       ) as us_citizenship_ok
 
     from candidates c
-  ) c
+) c
   where
   -- only return programs that satisfy the filtering boolean set (you can remove this WHERE to return near-misses)
     (
       c.recourse_ok
       and c.amortization_ok
       and (
-      -- if the UI supplied either sizing pct, require at least one sizing path to match
-        (not c.sizing_filter_provided) OR (c.fits_cltc OR c.fits_tpe)
+      -- [v3 change] if any capital stack toggle is on, require at least one capital stack type to match
+        (not c.sizing_filter_provided) OR (coalesce(c.fits_senior,false) OR coalesce(c.fits_subordinate,false) OR coalesce(c.fits_equity,false))
       )
 ----------------------- END of FILTERS, BEGIN RULES -----------------------
       and c.sizing_ok
@@ -506,6 +607,18 @@ results as (
       and c.us_citizenship_ok
     )
     or (not p_match_only) -- if p_match_only is false, return all candidates
+),
+
+-- derive soft_spot_score now that matched/match_score aliases are available
+results as (
+  select
+    rr.*,
+    (
+      (case when (rr.recency_rank <= 100) then 1 else 0 end)
+      + (case when rr.matched then 2 else 0 end)
+      + least(rr.match_score, 20) * 0.05
+    )::numeric as soft_spot_score
+  from raw_results rr
 ),
 
 -- Rank per organization and pick the top 1 program for each organization.
@@ -565,10 +678,3 @@ order by
   program_id
 limit p_limit offset p_offset;
 $$;
-
-
--- -- Deal-side numeric normalizations
--- alter table deals
---   add column if not exists net_worth_num numeric generated always as (parse_money_to_numeric(net_worth)) stored,
---   add column if not exists liquidity_num numeric generated always as (parse_money_to_numeric(liquidity)) stored,
---   add column if not exists credit_score_num numeric generated always as (parse_money_to_numeric(credit_score)) stored;
