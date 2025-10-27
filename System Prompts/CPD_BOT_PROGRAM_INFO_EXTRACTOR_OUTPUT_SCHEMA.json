@@ -2,16 +2,18 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://example.com/strict_cpd_json_schema",
   "title": "CPD Programs Schema",
-  "description": "Schema for commercial real estate lending program data extraction",
+  "description": "Schema for commercial real estate lending program data extraction with programs, organization, and contacts",
   "type": "object",
   "properties": {
     "programs": {
       "type": "array",
+      "description": "Array of lending programs extracted from the source material",
       "items": {
         "type": "object",
         "properties": {
           "Program_Name": {
-            "type": "string"
+            "type": "string",
+            "description": "Formal program name using format '[Provider Name] [Program Type]'"
           },
           "Asset_Parameters": {
             "type": "object",
@@ -407,25 +409,9 @@
               }
             }
           },
-          "Capital_Provider_Org": {
-            "type": "object",
-            "properties": {
-              "Name": {
-                "type": "string"
-              },
-              "Website_URL": {
-                "type": "string"
-              },
-              "HQ_Location": {
-                "type": "string"
-              },
-              "Parent_Organization": {
-                "type": "string"
-              }
-            }
-          },
           "Program_Type": {
             "type": "string",
+            "description": "Type of capital provider organization",
             "enum": [
               "Bank",
               "Credit Union",
@@ -440,39 +426,6 @@
               "REIT",
               "Other"
             ]
-          },
-          "Contacts": {
-            "type": "array",
-            "items": {
-              "type": "object",
-              "properties": {
-                "Name": {
-                  "type": "string"
-                },
-                "Email": {
-                  "type": "string",
-                  "format": "email"
-                },
-                "Phone": {
-                  "type": "string"
-                },
-                "Title": {
-                  "type": "string"
-                },
-                "LinkedIn": {
-                  "type": "string"
-                },
-                "Location": {
-                  "type": "string"
-                },
-                "Timezone": {
-                  "type": "string"
-                },
-                "Notes": {
-                  "type": "string"
-                }
-              }
-            }
           },
           "Marketing_Description": {
             "type": "string"
@@ -528,9 +481,140 @@
           }
         }
       }
+    },
+    "organization": {
+      "type": "object",
+      "description": "Single organization object representing the capital provider. There is always exactly one organization in context per extraction.",
+      "properties": {
+        "Name": {
+          "type": "string",
+          "description": "Legal entity name of the organization"
+        },
+        "HQ_Location": {
+          "type": "string",
+          "description": "Headquarters location in format 'City, State' (e.g., 'Boston, MA')"
+        },
+        "Organization_Type": {
+          "type": "string",
+          "description": "Type of organization",
+          "enum": [
+            "Bank",
+            "Credit Union",
+            "Agency",
+            "Life Co",
+            "CMBS",
+            "SBA",
+            "Debt Fund",
+            "Family Office",
+            "Private Equity",
+            "Private Debt",
+            "REIT",
+            "Other"
+          ]
+        },
+        "Website_URL": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Organization website URL"
+        },
+        "Parent_Organization": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Name of parent organization if applicable"
+        },
+        "Notes": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Additional notes about the organization"
+        }
+      },
+      "required": [
+        "Name"
+      ]
+    },
+    "contacts": {
+      "type": "array",
+      "description": "Array of contact objects representing individuals associated with the organization",
+      "items": {
+        "type": "object",
+        "properties": {
+          "Name": {
+            "type": "string",
+            "description": "Full name of the contact"
+          },
+          "Title": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Job title or role"
+          },
+          "Email": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "email",
+            "description": "Email address"
+          },
+          "Phone": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Phone number in format XXX-XXX-XXXX"
+          },
+          "Organization_Name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Name of the organization the contact belongs to"
+          },
+          "LinkedIn": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "LinkedIn profile URL or username"
+          },
+          "Location": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Geographic location of the contact"
+          },
+          "Timezone": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Timezone of the contact (e.g., 'EST', 'PST')"
+          },
+          "Notes": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Additional notes about the contact"
+          }
+        },
+        "required": [
+          "Name"
+        ]
+      }
     }
   },
   "required": [
-    "programs"
+    "programs",
+    "organization",
+    "contacts"
   ]
 }
