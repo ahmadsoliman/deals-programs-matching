@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://example.com/strict_cpd_json_schema",
   "title": "CPD Programs Schema",
-  "description": "Schema for commercial real estate lending program data extraction with programs, organization, and contacts",
+  "description": "Schema for commercial real estate lending program data extraction. Each program object contains nested organization and contacts data.",
   "type": "object",
   "properties": {
     "programs": {
@@ -17,42 +17,77 @@
           },
           "Asset_Parameters": {
             "type": "object",
+            "description": "Asset-related parameters and constraints",
             "properties": {
               "Asset_Types": {
                 "type": "array",
+                "description": "Types of assets the program accepts",
                 "items": {
                   "type": "string",
                   "enum": [
-                    "Mixed Use",
-                    "Apartments",
-                    "Condos",
-                    "1-4 Unit Rental",
-                    "Senior Housing",
-                    "Student Housing",
-                    "Assisted Living",
-                    "SFR Portfolio",
-                    "Mobile Home Park",
-                    "RV Parks",
-                    "Co-living",
-                    "Office",
-                    "Medical Office",
-                    "Manufacturing",
-                    "Light Industrial",
-                    "Cannabis",
-                    "Data Center",
-                    "Retail",
+                    "Dude Ranches",
                     "Hotel",
-                    "Short Term Housing",
-                    "Self-storage",
+                    "Short-Term Housing",
+                    "Resort",
+                    "Biomanufacturing Plants",
+                    "Film Studios",
+                    "Industrial Outdoor Storage/Truck Parking",
+                    "Warehouse/Logistics",
+                    "Timberland",
+                    "Raw Land",
+                    "Entitled Land",
+                    "Teachers Villages",
+                    "Multigenerational Housing",
+                    "Sober Housing",
+                    "Student Housing",
+                    "Micro-apartments",
+                    "Coliving",
+                    "Condominiums",
+                    "Military Housing",
+                    "Apartments",
+                    "Senior-Restricted Housing",
+                    "Assisted Living",
+                    "Managed Office",
+                    "Urban Office",
+                    "Suburban Office",
+                    "Medical Office",
+                    "Life Science",
+                    "Funeral Homes",
+                    "Gun Ranges",
+                    "Event Venues",
+                    "Cell Tower Leases",
+                    "Fixed-Base Operators",
+                    "Infrastructure",
+                    "Marinas",
                     "Hospital",
-                    "Religious",
-                    "Land",
-                    "Other"
+                    "Data Centers",
+                    "Churches",
+                    "Standalone Retail",
+                    "Grocery-anchored Retail",
+                    "Malls",
+                    "Single-Family Homes",
+                    "Single-Family Rentals/Build to Rent",
+                    "Car Condos",
+                    "Self-Storage",
+                    "Golf Country Club",
+                    "Memory Care",
+                    "Adolescent Rehab",
+                    "Townhomes",
+                    "Manufacturing",
+                    "Manufactured Housing",
+                    "RV Park",
+                    "Other",
+                    "Dispensaries",
+                    "Multifamily"
                   ]
                 }
               },
               "Commercial_Tenancy": {
-                "type": "string",
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Commercial tenancy type",
                 "enum": [
                   "Single tenant",
                   "Multi-tenant",
@@ -61,13 +96,18 @@
                 "default": "Any"
               },
               "Single_Tenant_list": {
-                "type": "string"
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "List of acceptable single tenants"
               },
               "Single_Tenant_Min_Bond_Credit_Rating": {
                 "type": [
                   "string",
                   "null"
                 ],
+                "description": "Minimum bond credit rating for single tenant",
                 "enum": [
                   null,
                   "Aaa",
@@ -99,13 +139,18 @@
                 "default": false
               },
               "Hotel_Flag_list": {
-                "type": "string"
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "List of acceptable hotel flags"
               },
               "Ground_Lease": {
                 "type": [
                   "string",
                   "null"
                 ],
+                "description": "Ground lease type",
                 "enum": [
                   null,
                   "Leasehold",
@@ -115,39 +160,50 @@
                 "default": null
               },
               "Min_Occupancy": {
-                "type": "string"
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Minimum occupancy requirement"
               },
               "Target_Property_Locations": {
                 "type": "array",
+                "description": "Target property locations by state, county, MSA, zip code, or city",
                 "items": {
                   "type": "object",
+                  "description": "Location specification",
                   "properties": {
                     "states": {
                       "type": "array",
+                      "description": "List of states",
                       "items": {
                         "type": "string"
                       }
                     },
                     "counties": {
                       "type": "array",
+                      "description": "List of counties",
                       "items": {
                         "type": "string"
                       }
                     },
                     "msas": {
                       "type": "array",
+                      "description": "List of Metropolitan Statistical Areas",
                       "items": {
                         "type": "string"
                       }
                     },
                     "zip_codes": {
                       "type": "array",
+                      "description": "List of zip codes",
                       "items": {
                         "type": "string"
                       }
                     },
                     "cities": {
                       "type": "array",
+                      "description": "List of cities",
                       "items": {
                         "type": "string"
                       }
@@ -159,9 +215,11 @@
           },
           "Deal_Parameters": {
             "type": "object",
+            "description": "Deal-related parameters and transaction types",
             "properties": {
               "Transaction_Types": {
                 "type": "array",
+                "description": "Types of transactions the program accepts",
                 "items": {
                   "type": "string",
                   "enum": [
@@ -173,13 +231,18 @@
                 }
               },
               "Term_Length": {
-                "type": "string"
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Typical term length for the program"
               },
               "Investment_Strategy": {
                 "type": [
                   "string",
                   "null"
                 ],
+                "description": "Investment strategy focus",
                 "enum": [
                   null,
                   "Core",
@@ -193,15 +256,25 @@
           },
           "Sizing": {
             "type": "object",
+            "description": "Deal sizing parameters and capital stack constraints",
             "properties": {
               "Minimum_Check_Size": {
-                "type": "string"
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Minimum deal size (typically in dollars)"
               },
               "Maximum_Check_Size": {
-                "type": "string"
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Maximum deal size (typically in dollars)"
               },
               "Capital_Stack": {
                 "type": "array",
+                "description": "Types of capital stack the program provides",
                 "items": {
                   "type": "string",
                   "enum": [
@@ -218,62 +291,71 @@
               },
               "Leverage_Constraints": {
                 "type": "object",
+                "description": "Leverage and financial constraints",
                 "properties": {
                   "Maximum_LTV": {
                     "type": [
                       "number",
                       "string",
                       "null"
-                    ]
+                    ],
+                    "description": "Maximum Loan-to-Value ratio"
                   },
                   "Minimum_DSCR": {
                     "type": [
                       "number",
                       "string",
                       "null"
-                    ]
+                    ],
+                    "description": "Minimum Debt Service Coverage Ratio"
                   },
                   "Minimum_Debt_Yield": {
                     "type": [
                       "number",
                       "string",
                       "null"
-                    ]
+                    ],
+                    "description": "Minimum debt yield requirement"
                   },
                   "Maximum_LTC": {
                     "type": [
                       "number",
                       "string",
                       "null"
-                    ]
+                    ],
+                    "description": "Maximum Loan-to-Cost ratio"
                   },
                   "Maximum_As-Stabilized_LTV": {
                     "type": [
                       "number",
                       "string",
                       "null"
-                    ]
+                    ],
+                    "description": "Maximum LTV at stabilization"
                   },
                   "Minimum_As-Stabilized_Debt_Yield": {
                     "type": [
                       "number",
                       "string",
                       "null"
-                    ]
+                    ],
+                    "description": "Minimum debt yield at stabilization"
                   },
                   "Minimum_Equity_Multiple": {
                     "type": [
                       "number",
                       "string",
                       "null"
-                    ]
+                    ],
+                    "description": "Minimum equity multiple requirement"
                   },
                   "Minimum_Equity_IRR": {
                     "type": [
                       "number",
                       "string",
                       "null"
-                    ]
+                    ],
+                    "description": "Minimum equity IRR requirement"
                   }
                 }
               }
@@ -281,63 +363,91 @@
           },
           "Sponsor_Requirements": {
             "type": "object",
+            "description": "Sponsor/borrower requirements and qualifications",
             "properties": {
               "Location": {
-                "type": "string"
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Geographic location requirements for sponsor"
               },
               "Experience_Level": {
-                "type": "string"
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Required experience level of sponsor"
               },
               "AUM": {
-                "type": "string"
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Assets Under Management requirement"
               },
               "US_Citizenship_Required": {
-                "type": "boolean",
-                "default": true
+                "type": [
+                  "boolean",
+                  "null"
+                ],
+                "description": "Whether US citizenship is required",
+                "default": null
               }
             }
           },
           "Guarantor_Requirements": {
             "type": "object",
+            "description": "Guarantor financial and credit requirements",
             "properties": {
               "Min_Credit_Score": {
                 "type": [
                   "number",
                   "string",
                   "null"
-                ]
+                ],
+                "description": "Minimum credit score requirement"
               },
               "Min_Net_Worth": {
                 "type": [
                   "number",
                   "string",
                   "null"
-                ]
+                ],
+                "description": "Minimum net worth requirement"
               },
               "Min_Net_Worth_Ratio": {
                 "type": [
                   "number",
                   "string",
                   "null"
-                ]
+                ],
+                "description": "Minimum net worth to loan amount ratio"
               },
               "Min_Liquidity": {
                 "type": [
                   "number",
                   "string",
                   "null"
-                ]
+                ],
+                "description": "Minimum liquidity requirement"
               },
               "Min_Liquidity_Ratio": {
                 "type": [
                   "number",
                   "string",
                   "null"
-                ]
+                ],
+                "description": "Minimum liquidity to loan amount ratio"
               },
               "Guarantor_Type": {
-                "type": "string",
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Type of guarantor accepted",
                 "enum": [
+                  null,
                   "Warm Body",
                   "Corporation OK"
                 ],
@@ -347,12 +457,14 @@
           },
           "Program_Term_Details": {
             "type": "object",
+            "description": "Program term, amortization, and closing details",
             "properties": {
               "Recourse": {
                 "type": [
                   "string",
                   "null"
                 ],
+                "description": "Recourse structure of the program",
                 "enum": [
                   null,
                   "Always Full Recourse",
@@ -362,18 +474,22 @@
                 "default": null
               },
               "Accepts_PACE_financing": {
-                "type": "string",
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Whether program accepts PACE financing",
                 "enum": [
+                  null,
                   "Yes",
                   "No",
                   "Unknown"
-                ]
+                ],
+                "default": "Unknown"
               },
               "Typical_Amortization": {
-                "type": [
-                  "array",
-                  "null"
-                ],
+                "type": "array",
+                "description": "Typical amortization periods offered",
                 "items": {
                   "type": "string",
                   "enum": [
@@ -386,14 +502,14 @@
                     "Self-Amortizing",
                     "Interest Only"
                   ]
-                },
-                "default": null
+                }
               },
               "Prepayment_Penalty": {
                 "type": [
                   "string",
                   "null"
                 ],
+                "description": "Prepayment penalty structure",
                 "enum": [
                   null,
                   "None",
@@ -405,14 +521,22 @@
                 "default": null
               },
               "Typical_Days_to_Close": {
-                "type": "string"
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Typical number of days to close"
               }
             }
           },
           "Program_Type": {
-            "type": "string",
+            "type": [
+              "string",
+              "null"
+            ],
             "description": "Type of capital provider organization",
             "enum": [
+              null,
               "Bank",
               "Credit Union",
               "Agency",
@@ -428,20 +552,35 @@
             ]
           },
           "Marketing_Description": {
-            "type": "string"
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Marketing description of the program"
           },
           "Notes": {
-            "type": "string"
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Additional notes about the program"
           },
           "Pricing": {
             "type": "object",
+            "description": "Pricing and interest rate details",
             "properties": {
               "Interest_Rate_Details": {
                 "type": "object",
+                "description": "Interest rate structure and indices",
                 "properties": {
                   "Rate_Type": {
-                    "type": "string",
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "Type of interest rate",
                     "enum": [
+                      null,
                       "Fixed",
                       "Floating",
                       "Both Available"
@@ -452,6 +591,7 @@
                       "string",
                       "null"
                     ],
+                    "description": "Rate index used for floating rates",
                     "enum": [
                       null,
                       "Fixed",
@@ -464,10 +604,18 @@
                     "default": null
                   },
                   "Minimum_Spread": {
-                    "type": "string"
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "Minimum spread over index"
                   },
                   "Maximum_Spread": {
-                    "type": "string"
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "Maximum spread over index"
                   }
                 }
               },
@@ -475,146 +623,153 @@
                 "type": [
                   "string",
                   "null"
-                ]
+                ],
+                "description": "Typical fees charged by the program"
               }
+            }
+          },
+          "Capital_Provider_Org": {
+            "type": "object",
+            "description": "Organization information for the capital provider",
+            "properties": {
+              "Name": {
+                "type": "string",
+                "description": "Legal entity name of the organization"
+              },
+              "HQ_Location": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Headquarters location in format 'City, State' (e.g., 'Boston, MA')"
+              },
+              "Organization_Type": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Type of organization",
+                "enum": [
+                  null,
+                  "Bank",
+                  "Credit Union",
+                  "Agency",
+                  "Life Co",
+                  "CMBS",
+                  "SBA",
+                  "Debt Fund",
+                  "Family Office",
+                  "Private Equity",
+                  "Private Debt",
+                  "REIT",
+                  "Other"
+                ]
+              },
+              "Website_URL": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Organization website URL"
+              },
+              "Parent_Organization": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Name of parent organization if applicable"
+              },
+              "Notes": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Additional notes about the organization"
+              }
+            },
+            "required": [
+              "Name"
+            ]
+          },
+          "Contacts": {
+            "type": "array",
+            "description": "Array of contact objects representing individuals associated with the organization",
+            "items": {
+              "type": "object",
+              "description": "Contact information for an individual",
+              "properties": {
+                "Name": {
+                  "type": "string",
+                  "description": "Full name of the contact"
+                },
+                "Title": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "Job title or role"
+                },
+                "Email": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "format": "email",
+                  "description": "Email address"
+                },
+                "Phone": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "Phone number in format XXX-XXX-XXXX"
+                },
+                "Organization_Name": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "Name of the organization the contact belongs to"
+                },
+                "LinkedIn": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "LinkedIn profile URL or username"
+                },
+                "Location": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "Geographic location of the contact"
+                },
+                "Timezone": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "Timezone of the contact (e.g., 'EST', 'PST')"
+                },
+                "Notes": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "Additional notes about the contact"
+                }
+              },
+              "required": [
+                "Name"
+              ]
             }
           }
         }
       }
-    },
-    "organization": {
-      "type": "object",
-      "description": "Single organization object representing the capital provider. There is always exactly one organization in context per extraction.",
-      "properties": {
-        "Name": {
-          "type": "string",
-          "description": "Legal entity name of the organization"
-        },
-        "HQ_Location": {
-          "type": "string",
-          "description": "Headquarters location in format 'City, State' (e.g., 'Boston, MA')"
-        },
-        "Organization_Type": {
-          "type": "string",
-          "description": "Type of organization",
-          "enum": [
-            "Bank",
-            "Credit Union",
-            "Agency",
-            "Life Co",
-            "CMBS",
-            "SBA",
-            "Debt Fund",
-            "Family Office",
-            "Private Equity",
-            "Private Debt",
-            "REIT",
-            "Other"
-          ]
-        },
-        "Website_URL": {
-          "type": [
-            "string",
-            "null"
-          ],
-          "description": "Organization website URL"
-        },
-        "Parent_Organization": {
-          "type": [
-            "string",
-            "null"
-          ],
-          "description": "Name of parent organization if applicable"
-        },
-        "Notes": {
-          "type": [
-            "string",
-            "null"
-          ],
-          "description": "Additional notes about the organization"
-        }
-      },
-      "required": [
-        "Name"
-      ]
-    },
-    "contacts": {
-      "type": "array",
-      "description": "Array of contact objects representing individuals associated with the organization",
-      "items": {
-        "type": "object",
-        "properties": {
-          "Name": {
-            "type": "string",
-            "description": "Full name of the contact"
-          },
-          "Title": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "Job title or role"
-          },
-          "Email": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "format": "email",
-            "description": "Email address"
-          },
-          "Phone": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "Phone number in format XXX-XXX-XXXX"
-          },
-          "Organization_Name": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "Name of the organization the contact belongs to"
-          },
-          "LinkedIn": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "LinkedIn profile URL or username"
-          },
-          "Location": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "Geographic location of the contact"
-          },
-          "Timezone": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "Timezone of the contact (e.g., 'EST', 'PST')"
-          },
-          "Notes": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "Additional notes about the contact"
-          }
-        },
-        "required": [
-          "Name"
-        ]
-      }
     }
   },
   "required": [
-    "programs",
-    "organization",
-    "contacts"
+    "programs"
   ]
 }

@@ -12,20 +12,20 @@ Before extraction, automatically determine which entity types are present in the
 
 ### Entity Types
 
-**Programs**: Lending products, loan terms, capital stack offerings, underwriting criteria, leverage constraints, recourse terms, amortization schedules, closing timelines, and program-specific requirements.
+**Programs**: Lending products, loan terms, capital stack offerings, underwriting criteria, leverage constraints, recourse terms, amortization schedules, closing timelines, and program-specific requirements. Each program includes nested organization and contacts data.
 
-**Organization**: Lender/investor company information, legal entity names, headquarters locations, company type (Bank, Fund, REIT, etc.), and organizational structure details.
+**Organization**: Lender/investor company information, legal entity names, headquarters locations, company type (Bank, Fund, REIT, etc.), and organizational structure details. Nested within each program object.
 
-**Contacts**: Individual people, their titles/roles, email addresses, phone numbers, and organizational affiliations. Extract from signatures, sender information, and message content.
+**Contacts**: Individual people, their titles/roles, email addresses, phone numbers, and organizational affiliations. Extract from signatures, sender information, and message content. Nested within each program object.
 
 ### Multi-Entity Messages
 
-Messages may update multiple entity types simultaneously. For example:
-- An email signature provides contact details (Contact) + organization name (Organization)
-- A program description includes organization info (Organization) + program terms (Program)
-- A message thread may contain updates to all three entity types
+Messages may contain multiple programs from different organizations with different contacts. For example:
+- A message describing multiple lending programs from different banks
+- Each program object contains its own organization and contacts data
+- When multiple programs are from the same organization, each program still contains the organization data (normalized structure)
 
-Extract and structure each entity type separately in the output, maintaining relationships between them (e.g., contact belongs to organization, program belongs to organization).
+Extract all programs with their associated organization and contacts data nested within each program object.
 
 ## Data Processing Standards
 
@@ -302,53 +302,51 @@ Use the Notes field to document:
             },
             "Program_Type": "Bank",
             "Marketing_Description": "NorthEast Community Bank offers flexible commercial mortgage financing for apartments, mixed-use, office, retail, and industrial properties in the Northeast, with personalized service and competitive rates.",
-            "Notes": "Non-recourse structure generally requires leverage below 50% and strong property viability. Bank can syndicate loans above $20 million. Fixed or floating rates available, priced to market using major indices."
-        }
-    ],
-    "organization":
-        {
-            "Name": "NorthEast Community Bank",
-            "Website": "https://www.necbank.com/",
-            "HQ_Location": "Boston, MA",
-            "Organization_Type": "Bank",
-            "Notes": "Extracted from program context and contact signature"
-        }
-    ,
-    "contacts": [
-        {
-            "Name": "Steven Luciano",
-            "Title": "SVP, Chief Lending Officer",
-            "Email": "steven.luciano@necbank.com",
-            "Phone": "914-821-1465",
-            "Organization_Name": "NorthEast Community Bank",
-            "Notes": "Extracted from email signature"
+            "Notes": "Non-recourse structure generally requires leverage below 50% and strong property viability. Bank can syndicate loans above $20 million. Fixed or floating rates available, priced to market using major indices.",
+            "Capital_Provider_Org": {
+                "Name": "NorthEast Community Bank",
+                "Website_URL": "https://www.necbank.com/",
+                "HQ_Location": "Boston, MA",
+                "Organization_Type": "Bank",
+                "Notes": "Extracted from program context and contact signature"
+            },
+            "Contacts": [
+                {
+                    "Name": "Steven Luciano",
+                    "Title": "SVP, Chief Lending Officer",
+                    "Email": "steven.luciano@necbank.com",
+                    "Phone": "914-821-1465",
+                    "Organization_Name": "NorthEast Community Bank",
+                    "Notes": "Extracted from email signature"
+                }
+            ]
         }
     ]
 }
 
 ## Output Structure
 
-Your output must include three top-level entities:
+Your output must be a single top-level `programs` array. Each program object contains program details and nested organization and contacts data:
 
 ```json
 {
-    "programs": [...],
-    "organization": {...},
-    "contacts": [...]
+    "programs": [...]
 }
 ```
 
-**programs**: Array of program objects with all lending product details
-**organization**: Organization object (lenders, investors, capital providers)
-**contacts**: Array of contact objects (individuals with roles and contact information)
+**programs**: Array of program objects, each containing:
+- All lending product details (Asset_Parameters, Deal_Parameters, Sizing, etc.)
+- **Capital_Provider_Org**: Organization object with lender/investor information
+- **Contacts**: Array of contact objects associated with the program
 
-Each array may be empty if no data of that type is found in the message.
+When multiple programs are mentioned, each program object contains its own organization and contacts data.
 
 ## Final Instructions
 
-Your output must be a single, well-structured JSON object without code block or any comments. It should capture all available information about all programs, organization, and contacts found while adhering to these processing guidelines and formatting standards.
+Your output must be a single, well-structured JSON object without code block or any comments. It should capture all available information about all programs with their nested organization and contacts data while adhering to these processing guidelines and formatting standards.
 
 **Key Reminders**:
+
 1. Apply intelligent inference based on context, industry standards, and related fields
 2. Prioritize accuracy over completeness—leave fields empty when uncertain
 3. Normalize all values to match database schema exactly
@@ -356,3 +354,6 @@ Your output must be a single, well-structured JSON object without code block or 
 5. Distinguish between "not mentioned" (empty) and "explicitly N/A" (note in Notes)
 6. Document ambiguities and inferences in the Notes field
 7. Exclude internal contacts (saltandwisdom.com, ludianadvisors.com domains)
+8. Each program object must include Capital_Provider_Org and Contacts nested within it
+9. When multiple programs are from the same organization, each program still contains the organization data
+10. Contacts array can be empty if no contacts are found for a program
