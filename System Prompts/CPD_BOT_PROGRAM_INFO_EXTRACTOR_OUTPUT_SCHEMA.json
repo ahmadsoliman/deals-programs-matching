@@ -1,0 +1,536 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.com/strict_cpd_json_schema",
+  "title": "CPD Programs Schema",
+  "description": "Schema for commercial real estate lending program data extraction",
+  "type": "object",
+  "properties": {
+    "programs": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "Program_Name": {
+            "type": "string"
+          },
+          "Asset_Parameters": {
+            "type": "object",
+            "properties": {
+              "Asset_Types": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "enum": [
+                    "Mixed Use",
+                    "Apartments",
+                    "Condos",
+                    "1-4 Unit Rental",
+                    "Senior Housing",
+                    "Student Housing",
+                    "Assisted Living",
+                    "SFR Portfolio",
+                    "Mobile Home Park",
+                    "RV Parks",
+                    "Co-living",
+                    "Office",
+                    "Medical Office",
+                    "Manufacturing",
+                    "Light Industrial",
+                    "Cannabis",
+                    "Data Center",
+                    "Retail",
+                    "Hotel",
+                    "Short Term Housing",
+                    "Self-storage",
+                    "Hospital",
+                    "Religious",
+                    "Land",
+                    "Other"
+                  ]
+                }
+              },
+              "Commercial_Tenancy": {
+                "type": "string",
+                "enum": [
+                  "Single tenant",
+                  "Multi-tenant",
+                  "Any"
+                ],
+                "default": "Any"
+              },
+              "Single_Tenant_list": {
+                "type": "string"
+              },
+              "Single_Tenant_Min_Bond_Credit_Rating": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "enum": [
+                  null,
+                  "Aaa",
+                  "Aa1",
+                  "Aa2",
+                  "Aa3",
+                  "A1",
+                  "A2",
+                  "A3",
+                  "Baa1",
+                  "Baa2",
+                  "Baa3",
+                  "Ba1",
+                  "Ba2",
+                  "Ba3",
+                  "B1",
+                  "B2",
+                  "B3",
+                  "Caa1",
+                  "Caa2",
+                  "Caa3",
+                  "Ca",
+                  "C"
+                ],
+                "default": null
+              },
+              "Hotel_Flag_required": {
+                "type": "boolean",
+                "default": false
+              },
+              "Hotel_Flag_list": {
+                "type": "string"
+              },
+              "Ground_Lease": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "enum": [
+                  null,
+                  "Leasehold",
+                  "Leased Fee",
+                  "Fee Simple"
+                ],
+                "default": null
+              },
+              "Min_Occupancy": {
+                "type": "string"
+              },
+              "Target_Property_Locations": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "states": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "counties": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "msas": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "zip_codes": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "cities": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "Deal_Parameters": {
+            "type": "object",
+            "properties": {
+              "Transaction_Types": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "enum": [
+                    "Acquisition",
+                    "New Development",
+                    "Redevelopment",
+                    "Refinance"
+                  ]
+                }
+              },
+              "Term_Length": {
+                "type": "string"
+              },
+              "Investment_Strategy": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "enum": [
+                  null,
+                  "Core",
+                  "Core Plus",
+                  "Value-Add",
+                  "Opportunistic"
+                ],
+                "default": null
+              }
+            }
+          },
+          "Sizing": {
+            "type": "object",
+            "properties": {
+              "Minimum_Check_Size": {
+                "type": "string"
+              },
+              "Maximum_Check_Size": {
+                "type": "string"
+              },
+              "Capital_Stack": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "enum": [
+                    "Senior",
+                    "Mezzanine",
+                    "Preferred Equity",
+                    "LP Equity",
+                    "Co-GP Equity",
+                    "PACE",
+                    "Line of Credit",
+                    "Note Purchase"
+                  ]
+                }
+              },
+              "Leverage_Constraints": {
+                "type": "object",
+                "properties": {
+                  "Maximum_LTV": {
+                    "type": [
+                      "number",
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "Minimum_DSCR": {
+                    "type": [
+                      "number",
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "Minimum_Debt_Yield": {
+                    "type": [
+                      "number",
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "Maximum_LTC": {
+                    "type": [
+                      "number",
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "Maximum_As-Stabilized_LTV": {
+                    "type": [
+                      "number",
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "Minimum_As-Stabilized_Debt_Yield": {
+                    "type": [
+                      "number",
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "Minimum_Equity_Multiple": {
+                    "type": [
+                      "number",
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "Minimum_Equity_IRR": {
+                    "type": [
+                      "number",
+                      "string",
+                      "null"
+                    ]
+                  }
+                }
+              }
+            }
+          },
+          "Sponsor_Requirements": {
+            "type": "object",
+            "properties": {
+              "Location": {
+                "type": "string"
+              },
+              "Experience_Level": {
+                "type": "string"
+              },
+              "AUM": {
+                "type": "string"
+              },
+              "US_Citizenship_Required": {
+                "type": "boolean",
+                "default": true
+              }
+            }
+          },
+          "Guarantor_Requirements": {
+            "type": "object",
+            "properties": {
+              "Min_Credit_Score": {
+                "type": [
+                  "number",
+                  "string",
+                  "null"
+                ]
+              },
+              "Min_Net_Worth": {
+                "type": [
+                  "number",
+                  "string",
+                  "null"
+                ]
+              },
+              "Min_Net_Worth_Ratio": {
+                "type": [
+                  "number",
+                  "string",
+                  "null"
+                ]
+              },
+              "Min_Liquidity": {
+                "type": [
+                  "number",
+                  "string",
+                  "null"
+                ]
+              },
+              "Min_Liquidity_Ratio": {
+                "type": [
+                  "number",
+                  "string",
+                  "null"
+                ]
+              },
+              "Guarantor_Type": {
+                "type": "string",
+                "enum": [
+                  "Warm Body",
+                  "Corporation OK"
+                ],
+                "default": "Warm Body"
+              }
+            }
+          },
+          "Program_Term_Details": {
+            "type": "object",
+            "properties": {
+              "Recourse": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "enum": [
+                  null,
+                  "Always Full Recourse",
+                  "Always Non-recourse",
+                  "Selective"
+                ],
+                "default": null
+              },
+              "Accepts_PACE_financing": {
+                "type": "string",
+                "enum": [
+                  "Yes",
+                  "No",
+                  "Unknown"
+                ]
+              },
+              "Typical_Amortization": {
+                "type": [
+                  "array",
+                  "null"
+                ],
+                "items": {
+                  "type": "string",
+                  "enum": [
+                    "15",
+                    "20",
+                    "25",
+                    "30",
+                    "35",
+                    "40",
+                    "Self-Amortizing",
+                    "Interest Only"
+                  ]
+                },
+                "default": null
+              },
+              "Prepayment_Penalty": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "enum": [
+                  null,
+                  "None",
+                  "Stepdown",
+                  "Lockout",
+                  "Defeasance",
+                  "Yield Maintenance"
+                ],
+                "default": null
+              },
+              "Typical_Days_to_Close": {
+                "type": "string"
+              }
+            }
+          },
+          "Capital_Provider_Org": {
+            "type": "object",
+            "properties": {
+              "Name": {
+                "type": "string"
+              },
+              "Website_URL": {
+                "type": "string"
+              },
+              "HQ_Location": {
+                "type": "string"
+              },
+              "Parent_Organization": {
+                "type": "string"
+              }
+            }
+          },
+          "Program_Type": {
+            "type": "string",
+            "enum": [
+              "Bank",
+              "Credit Union",
+              "Agency",
+              "Life Co",
+              "CMBS",
+              "SBA",
+              "Debt Fund",
+              "Family Office",
+              "Private Equity",
+              "Private Debt",
+              "REIT",
+              "Other"
+            ]
+          },
+          "Contacts": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "Name": {
+                  "type": "string"
+                },
+                "Email": {
+                  "type": "string",
+                  "format": "email"
+                },
+                "Phone": {
+                  "type": "string"
+                },
+                "Title": {
+                  "type": "string"
+                },
+                "LinkedIn": {
+                  "type": "string"
+                },
+                "Location": {
+                  "type": "string"
+                },
+                "Timezone": {
+                  "type": "string"
+                },
+                "Notes": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "Marketing_Description": {
+            "type": "string"
+          },
+          "Notes": {
+            "type": "string"
+          },
+          "Pricing": {
+            "type": "object",
+            "properties": {
+              "Interest_Rate_Details": {
+                "type": "object",
+                "properties": {
+                  "Rate_Type": {
+                    "type": "string",
+                    "enum": [
+                      "Fixed",
+                      "Floating",
+                      "Both Available"
+                    ]
+                  },
+                  "Rate_Index": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "enum": [
+                      null,
+                      "Fixed",
+                      "UST",
+                      "5yr CMT",
+                      "SOFR Swaps",
+                      "Term SOFR",
+                      "Prime"
+                    ],
+                    "default": null
+                  },
+                  "Minimum_Spread": {
+                    "type": "string"
+                  },
+                  "Maximum_Spread": {
+                    "type": "string"
+                  }
+                }
+              },
+              "Typical_Fees": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "required": [
+    "programs"
+  ]
+}
