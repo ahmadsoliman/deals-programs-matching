@@ -1,8 +1,8 @@
 
-create or replace function rpc_match_programs_v4(
+create or replace function rpc_match_programs_v5(
   p_deal_id bigint,
   p_filters jsonb default '{}'::jsonb,   -- UI filters (recourse, amortization, capital stack sliders, etc.)
-  p_sort_by text default 'updated',      -- 'updated'|'score'|'check_size'|'soft_spot'
+  p_sort_by text default 'updated',      -- 'updated'|'score'|'check_size'|'sweet_spot'
   p_match_only boolean default true,     -- if true, only return programs that fully match all criteria; if false, return all candidates with match score
   p_limit int default 100,
   p_offset int default 0
@@ -36,7 +36,8 @@ as $$
    - [v2 change] Sizing comparisons are open-ended when program min/max are NULL (ignore missing bound)
    - [v2 change] US citizenship logic is permissive when unknown
    - [v2 change] Money parsing avoids forcing 0 on parse failures; use permissive logic explicitly
-   - [v2 change] Implement p_sort_by: 'updated' (default), 'score', 'check_size', and 'soft_spot' (starter heuristic)
+   - [v2 change] Implement p_sort_by: 'updated' (default), 'score', 'check_size', and 'sweet_spot'
+   - [v5 change] Replaced placeholder soft_spot_score with multi-dimensional sweet_spot_score for specificity ranking
    - [v2 change] Keep original comments; added v2 comments where changes were applied
 */
 
@@ -196,7 +197,34 @@ candidates as (
     f.eq_cogp_cb,
     f.eq_lp_cb,
     f.eq_pace_cb,
-    f.eq_glb_cb
+    f.eq_glb_cb,
+
+    -- [v5 change] Sweet spot scoring helper columns
+    -- Check size range width (NULL if both bounds missing)
+    (case
+       when p.minimum_check_size is null and p.maximum_check_size is null then null
+       when p.minimum_check_size is null then p.maximum_check_size  -- treat as 0 to max
+       when p.maximum_check_size is null then null  -- open-ended, can't compute width
+       else p.maximum_check_size - p.minimum_check_size
+     end) as p_check_size_range_width,
+    -- Asset type count for program
+    (
+      select count(*)::int
+      from program_asset_types pat
+      where pat.program_id = p.id
+    ) as p_asset_type_count,
+    -- Location count for program (number of entries in target_property_locations jsonb)
+    -- Handle both object (count keys) and array (count elements) formats
+    (case
+       when p.target_property_locations is null then 0
+       when jsonb_typeof(p.target_property_locations) = 'object' then
+         (select count(*)::int from jsonb_object_keys(p.target_property_locations))
+       when jsonb_typeof(p.target_property_locations) = 'array' then
+         jsonb_array_length(p.target_property_locations)
+       else 0
+     end) as p_location_count,
+    -- Transaction type count for program
+    cardinality(coalesce(p.transaction_types, ARRAY[]::text[])) as p_transaction_type_count
 
   from programs p
   left join organizations o on p.organization_id = o.id
@@ -318,7 +346,7 @@ raw_results as (
 
     -- [v2 change] Provide computed helper values for sorting (not exposed in result set)
     -- check_size_diff: distance from deal value to program range center (smaller is better)
-    -- soft_spot_score is computed in the next CTE so it can reference the matched alias safely
+    -- sweet_spot_score is computed in the next CTE so it can reference the matched alias safely
     -- These are used only in ORDER BY below.
     (case
        when c.p_minimum_check_size is null and c.p_maximum_check_size is null then null
@@ -326,7 +354,22 @@ raw_results as (
        when c.p_maximum_check_size is null then abs(coalesce(c.d_project_budget,0) - c.p_minimum_check_size)
        else abs(coalesce(c.d_project_budget,0) - ((c.p_minimum_check_size + c.p_maximum_check_size)/2.0))
      end) as check_size_diff,
-    recency_rank
+    recency_rank,
+    -- [v5 change] Sweet spot scoring helper columns passed through
+    c.p_check_size_range_width,
+    c.p_asset_type_count,
+    c.p_location_count,
+    c.p_transaction_type_count,
+    c.p_minimum_check_size,
+    c.p_maximum_check_size,
+    c.d_project_budget,
+    c.p_program_asset_type_ids,
+    c.d_asset_type_ids,
+    c.p_transaction_types,
+    c.d_financing_type,
+    location_ok,
+    asset_type_ok,
+    financing_ok
   from (
     -- inner-most: compute every boolean as in your previous implementation
     select
@@ -350,7 +393,7 @@ raw_results as (
         END
       ) as typical_days_max,
 
-      -- [v2 change] Provide a simple recency rank per entire candidate set for soft_spot
+      -- [v2 change] Provide a simple recency rank per entire candidate set for sweet_spot
       row_number() over (order by c.p_updated_at desc nulls last, c.p_id) as recency_rank,
 
     -- program filters from UI
@@ -703,15 +746,88 @@ raw_results as (
     or (not p_match_only) -- if p_match_only is false, return all candidates
 ),
 
--- derive soft_spot_score now that matched/match_score aliases are available
+-- [v5 change] Compute sweet_spot_score: multi-dimensional specificity scoring
+-- Higher scores for programs that narrowly target deals like this one
 results as (
   select
     rr.*,
     (
-      (case when (rr.recency_rank <= 100) then 1 else 0 end)
-      + (case when rr.matched then 2 else 0 end)
-      + least(rr.match_score, 20) * 0.05
-    )::numeric as soft_spot_score
+      -- 1. CHECK SIZE SWEET SPOT (0-30 points)
+      -- Centeredness (0-15): how close deal is to midpoint of range
+      -- Narrowness (0-15): inverse of range width (narrower = better)
+      -- Penalty: both min AND max NULL = 0 points (generalist)
+      (case
+         -- Both bounds NULL: generalist penalty
+         when rr.p_minimum_check_size is null and rr.p_maximum_check_size is null then 0
+         -- Only max defined (0 to max range)
+         when rr.p_minimum_check_size is null and rr.p_maximum_check_size is not null then
+           case
+             when rr.d_project_budget is null then 5  -- partial credit, can't compute centeredness
+             when rr.d_project_budget <= rr.p_maximum_check_size then
+               -- Centeredness: closer to midpoint (max/2) = higher score
+               15.0 * greatest(0, 1.0 - abs(rr.d_project_budget - rr.p_maximum_check_size/2.0) / (rr.p_maximum_check_size/2.0))
+               -- Narrowness bonus based on max size (smaller max = more specific)
+               + least(15.0, 15.0 * (10000000.0 / greatest(rr.p_maximum_check_size, 1)))
+             else 0  -- deal outside range
+           end
+         -- Only min defined (open-ended): partial score, less specific
+         when rr.p_maximum_check_size is null then
+           case
+             when rr.d_project_budget is null then 3
+             when rr.d_project_budget >= rr.p_minimum_check_size then 8  -- matches but open-ended
+             else 0
+           end
+         -- Both bounds defined: full scoring
+         else
+           case
+             when rr.d_project_budget is null then 10  -- partial credit
+             when rr.d_project_budget >= rr.p_minimum_check_size 
+                  and rr.d_project_budget <= rr.p_maximum_check_size then
+               -- Centeredness: distance from midpoint as fraction of half-range
+               15.0 * greatest(0, 1.0 - abs(rr.d_project_budget - (rr.p_minimum_check_size + rr.p_maximum_check_size)/2.0) 
+                                        / greatest((rr.p_maximum_check_size - rr.p_minimum_check_size)/2.0, 1))
+               -- Narrowness: smaller range = higher score (scale to reasonable max)
+               + least(15.0, 15.0 * least(1.0, 50000000.0 / greatest(rr.p_check_size_range_width, 1)))
+             else 0  -- deal outside range
+           end
+       end)
+      
+      -- 2. ASSET TYPE SPECIFICITY (0-20 points)
+      -- Match bonus (10): program's asset types overlap with deal
+      -- Specificity bonus (0-10): fewer total asset types = higher score
+      -- Penalty: empty program asset types = 0 points
+      + (case
+           when rr.p_asset_type_count = 0 then 0  -- generalist penalty
+           when rr.asset_type_ok then
+             10  -- match bonus
+             + least(10.0, 10.0 * (1.0 / greatest(rr.p_asset_type_count, 1)))  -- specificity bonus
+           else 0  -- no match
+         end)
+      
+      -- 3. GEOGRAPHIC SPECIFICITY (0-20 points)
+      -- Match bonus (10): deal location matches program's target
+      -- Specificity bonus (0-10): fewer locations = higher score
+      -- Penalty: NULL/empty locations = 0 points
+      + (case
+           when rr.p_location_count = 0 then 0  -- generalist penalty
+           when rr.location_ok then
+             10  -- match bonus
+             + least(10.0, 10.0 * (1.0 / greatest(rr.p_location_count, 1)))  -- specificity bonus
+           else 0  -- no match
+         end)
+      
+      -- 4. TRANSACTION TYPE SPECIFICITY (0-10 points)
+      -- Match bonus (5): overlap with deal's financing type
+      -- Specificity bonus (0-5): fewer transaction types = higher score
+      -- Penalty: empty = 0 points
+      + (case
+           when rr.p_transaction_type_count = 0 then 0  -- generalist penalty
+           when rr.financing_ok then
+             5  -- match bonus
+             + least(5.0, 5.0 * (1.0 / greatest(rr.p_transaction_type_count, 1)))  -- specificity bonus
+           else 0  -- no match
+         end)
+    )::numeric as sweet_spot_score
   from raw_results rr
 ),
 
@@ -754,7 +870,7 @@ from ranked
 where rn = 1
 order by
   -- [v2 change] Implement dynamic sort modes. Fallback to 'updated' preference if unknown.
-  case when p_sort_by in ('updated','score','check_size','soft_spot') then 0 else 1 end,
+  case when p_sort_by in ('updated','score','check_size','sweet_spot') then 0 else 1 end,
   -- 'score': matched desc, match_score desc, updated_at desc
   case when p_sort_by = 'score' then (case when matched then 1 else 0 end) end desc nulls last,
   case when p_sort_by = 'score' then match_score end desc nulls last,
@@ -763,8 +879,8 @@ order by
   case when p_sort_by = 'check_size' then check_size_diff end asc nulls last,
   case when p_sort_by = 'check_size' then (case when matched then 1 else 0 end) end desc nulls last,
   case when p_sort_by = 'check_size' then match_score end desc nulls last,
-  -- 'soft_spot': simple heuristic that prefers matched, score, and recency via soft_spot_score
-  case when p_sort_by = 'soft_spot' then soft_spot_score end desc nulls last,
+  -- 'sweet_spot': specificity score that prefers programs narrowly focused on deals like this one
+  case when p_sort_by = 'sweet_spot' then sweet_spot_score end desc nulls last,
   -- default 'updated': keep same preference as original
   (case when matched then 1 else 0 end) desc,
   match_score desc,
@@ -774,11 +890,62 @@ limit p_limit offset p_offset;
 $$;
 
 
-select program_id, program_name, match_reasons
-from rpc_match_programs_v4(
+-- ============================================================================
+-- TEST QUERIES FOR SWEET SPOT SCORE
+-- ============================================================================
+
+-- 1. Basic sweet_spot sorting - returns programs sorted by specificity score
+--    Programs that narrowly target deals like this one rank higher
+select *
+from rpc_match_programs_v5(
   p_deal_id := 35,
-  p_filters := '{"closing_timeline_days": 200}',
-  p_match_only := false,
+  p_filters := '{}',
+  p_sort_by := 'sweet_spot',
+  p_match_only := true,
+  p_limit := 100
+);
+
+-- 2. Compare sweet_spot vs default (updated) sorting
+--    Run both and compare which programs appear first
+-- Default sorting (by updated_at):
+select program_id, program_name, match_score, organization_name
+from rpc_match_programs_v5(
+  p_deal_id := 35,
+  p_filters := '{}',
+  p_sort_by := 'updated',
+  p_match_only := true,
   p_limit := 20
-)
-where not matched or match_reasons ? 'closing_timeline_ok';
+);
+
+-- Sweet spot sorting (by specificity):
+select program_id, program_name, match_score, organization_name
+from rpc_match_programs_v5(
+  p_deal_id := 35,
+  p_filters := '{}',
+  p_sort_by := 'sweet_spot',
+  p_match_only := true,
+  p_limit := 20
+);
+
+-- 3. Sweet spot with filters - combines advanced filters with specificity ranking
+select *
+from rpc_match_programs_v5(
+  p_deal_id := 35,
+  p_filters := '{
+    "program_type": "Debt Fund"
+  }',
+  p_sort_by := 'sweet_spot',
+  p_match_only := true,
+  p_limit := 50
+);
+
+-- 4. All candidates with sweet_spot (p_match_only := false)
+--    Shows all programs including near-misses, sorted by specificity
+select program_id, program_name, matched, match_score, match_reasons
+from rpc_match_programs_v5(
+  p_deal_id := 35,
+  p_filters := '{}',
+  p_sort_by := 'sweet_spot',
+  p_match_only := false,
+  p_limit := 50
+);
