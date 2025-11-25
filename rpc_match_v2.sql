@@ -1,5 +1,5 @@
 
-create or replace function rpc_match_programs(
+create or replace function rpc_match_programs_v4(
   p_deal_id bigint,
   p_filters jsonb default '{}'::jsonb,   -- UI filters (recourse, amortization, capital stack sliders, etc.)
   p_sort_by text default 'updated',      -- 'updated'|'score'|'check_size'|'soft_spot'
@@ -58,6 +58,10 @@ filters as (
   select
     (pf -> 'recourse')::jsonb                         as recourse_filter_json,   -- may be array or null
     (pf ->> 'amortization')                           as amortization_filter,
+    nullif(trim(coalesce(pf ->> 'program_type', '')), '') as program_type_filter,
+    ((pf ->> 'us_citizenship_filter')::boolean)       as us_citizenship_filter,
+    ((pf ->> 'accepts_pace_filter')::boolean)         as accepts_pace_filter,
+    nullif(trim(coalesce(pf ->> 'closing_timeline_days', '')), '')::numeric as closing_days_filter,
     -- [v3 change] New capital stack slider inputs (percentages as integers, e.g. 46 = 46%)
     nullif(trim(coalesce(pf ->> 'Senior_input', '')), '')::numeric       as senior_pct,
     nullif(trim(coalesce(pf ->> 'Subordinate_input', '')), '')::numeric  as subordinate_pct,
@@ -84,11 +88,13 @@ candidates as (
   select
     p.id                                       as p_id,
     p.name                                     as p_name,
+    p.program_type                              as p_program_type,
     p.organization_id                          as p_org_id,
     o.name                                     as p_org_name,
     o.hq_location                              as p_org_location,
     p.recourse                                 as p_recourse,
     p.typical_amortization                     as p_typical_amortization,
+    p.typical_days_to_close                    as p_typical_days_to_close,
     p.minimum_check_size                       as p_minimum_check_size,
     p.maximum_check_size                       as p_maximum_check_size,
     p.capital_stack                            as p_capital_stack,
@@ -129,6 +135,7 @@ candidates as (
     p.sponsor_aum_req                                 as p_sponsor_aum_req,
     p.min_credit_score                                as p_min_credit_score,
     p.us_citizenship_required                         as p_us_citizenship_required,
+    p.accepts_pace_financing                          as p_accepts_pace_financing,
     pe.extra                                          as p_extra,
 
     -- deal fields (explicit aliases)
@@ -171,6 +178,10 @@ candidates as (
     -- [v2 change] Keep JSON for recourse so we can detect empty array vs null
     f.recourse_filter_json,
     f.amortization_filter,
+    f.program_type_filter,
+    f.us_citizenship_filter,
+    f.accepts_pace_filter,
+    f.closing_days_filter,
     -- [v3 change] New capital stack filter values
     f.senior_pct,
     f.subordinate_pct,
@@ -217,6 +228,7 @@ raw_results as (
     (
       (case when recourse_ok then 1 else 0 end)
     + (case when amortization_ok then 1 else 0 end)
+    + (case when program_type_ok then 1 else 0 end)
     -- [v3 change] Updated to use new capital stack filters (Senior, Subordinate, Equity)
     + (case when (not sizing_filter_provided) or (coalesce(fits_senior,false) and sizing_filter_provided) then 1 else 0 end)
     + (case when (not sizing_filter_provided) or (coalesce(fits_subordinate,false) and sizing_filter_provided) then 1 else 0 end)
@@ -238,6 +250,8 @@ raw_results as (
     + (case when aum_ok then 1 else 0 end)
     + (case when credit_ok then 1 else 0 end)
     + (case when us_citizenship_ok then 1 else 0 end)
+    + (case when pace_ok then 1 else 0 end)
+    + (case when closing_timeline_ok then 1 else 0 end)
     -- 21.0  -- total number of boolean checks (now 3 capital stack filters + 18 other checks)
     )::integer as match_score,
   -- final matched decision: must satisfy all boolean checks below (plus recourse/amortization)
@@ -273,6 +287,7 @@ raw_results as (
              values
              ('recourse_ok',             recourse_ok),
              ('amortization_ok',         amortization_ok),
+             ('program_type_ok',         program_type_ok),
              ('sizing_filter_provided',  sizing_filter_provided),
              ('capital_stack_ok',        (not sizing_filter_provided) OR (coalesce(fits_senior,false) OR coalesce(fits_subordinate,false) OR coalesce(fits_equity,false))),
              -- Show fits_* as NULL when the corresponding toggle is off (instead of auto-true)
@@ -294,7 +309,9 @@ raw_results as (
              ('liquidity_ratio_ok',      liquidity_ratio_ok),
              ('aum_ok',                  aum_ok),
              ('credit_ok',               credit_ok),
-             ('us_citizenship_ok',       us_citizenship_ok)
+             ('us_citizenship_ok',       us_citizenship_ok),
+             ('pace_ok',                 pace_ok),
+             ('closing_timeline_ok',     closing_timeline_ok)
            ) as t(key, value)
       where value <> true
     ) as match_reasons,
@@ -314,6 +331,24 @@ raw_results as (
     -- inner-most: compute every boolean as in your previous implementation
     select
       c.*,
+
+      -- Parsed typical days to close bounds
+      (
+        CASE
+          WHEN c.p_typical_days_to_close IS NULL THEN NULL
+          WHEN position('-' in c.p_typical_days_to_close) > 0 THEN
+            nullif(regexp_replace(split_part(c.p_typical_days_to_close, '-', 1), '[^0-9.]', '', 'g'), '')::numeric
+          ELSE nullif(regexp_replace(c.p_typical_days_to_close, '[^0-9.]', '', 'g'), '')::numeric
+        END
+      ) as typical_days_min,
+      (
+        CASE
+          WHEN c.p_typical_days_to_close IS NULL THEN NULL
+          WHEN position('-' in c.p_typical_days_to_close) > 0 THEN
+            nullif(regexp_replace(split_part(c.p_typical_days_to_close, '-', 2), '[^0-9.]', '', 'g'), '')::numeric
+          ELSE nullif(regexp_replace(c.p_typical_days_to_close, '[^0-9.]', '', 'g'), '')::numeric
+        END
+      ) as typical_days_max,
 
       -- [v2 change] Provide a simple recency rank per entire candidate set for soft_spot
       row_number() over (order by c.p_updated_at desc nulls last, c.p_id) as recency_rank,
@@ -345,6 +380,12 @@ raw_results as (
            )
          )
       end) as amortization_ok,
+
+    -- program_type filter (exact match, case-insensitive)
+      (
+        c.program_type_filter IS NULL
+        OR lower(coalesce(c.p_program_type,'')) = lower(c.program_type_filter)
+      ) as program_type_ok,
 
     -- [v3 change] New capital stack matching logic with toggles, checkboxes, and sliders
     -- Calculate check amounts for each slider (percentage as fraction * deal value)
@@ -445,6 +486,8 @@ raw_results as (
           )
         END
       ) as fits_equity,
+
+
 ----------------------- END of FILTERS, BEGIN RULES -----------------------
 
     -- financing_type: if p_transaction_types is empty or null, the program matches all financing types; otherwise, arrays must overlap
@@ -569,13 +612,61 @@ raw_results as (
         OR (c.d_credit_score_num >= c.p_min_credit_score)
       ) as credit_ok,
 
-    -- US citizenship: [v2 change] permissive when unknown (deal NULL => ok);
-    -- ok if program does not require; if program requires, then deal must be true.
+    -- US citizenship:
+    -- program requirement still enforced; optional UI filter only when user asks for it.
       (
-        (coalesce(c.p_us_citizenship_required, false) = false)
-        OR (c.d_us_citizenship IS NULL)
-        OR (c.d_us_citizenship IS TRUE AND c.p_us_citizenship_required IS TRUE)
-      ) as us_citizenship_ok
+        (
+          (coalesce(c.p_us_citizenship_required, false) = false)
+          OR (c.d_us_citizenship IS NULL)
+          OR (c.d_us_citizenship IS TRUE AND c.p_us_citizenship_required IS TRUE)
+        )
+        AND
+        (
+          coalesce(c.us_citizenship_filter, false) IS DISTINCT FROM true
+          OR c.d_us_citizenship IS TRUE
+        )
+      ) as us_citizenship_ok,
+
+    -- Accepts PACE standalone filter (independent of capital stack toggles)
+      (
+        coalesce(c.accepts_pace_filter, false) IS DISTINCT FROM true
+        OR lower(nullif(trim(coalesce(c.p_accepts_pace_financing, '')), '')) = 'yes'
+      ) as pace_ok,
+
+    -- Closing timeline filter (inline parsing of typical_days_to_close)
+      (
+        c.closing_days_filter IS NULL
+        OR (
+             (c.p_typical_days_to_close IS NULL OR trim(c.p_typical_days_to_close) = '')
+             OR (
+               (
+                 (CASE
+                    WHEN position('-' in c.p_typical_days_to_close) > 0 THEN
+                      nullif(regexp_replace(split_part(c.p_typical_days_to_close, '-', 1), '[^0-9.]', '', 'g'), '')::numeric
+                    ELSE nullif(regexp_replace(c.p_typical_days_to_close, '[^0-9.]', '', 'g'), '')::numeric
+                  END) IS NULL
+                 OR c.closing_days_filter >= (CASE
+                    WHEN position('-' in c.p_typical_days_to_close) > 0 THEN
+                      nullif(regexp_replace(split_part(c.p_typical_days_to_close, '-', 1), '[^0-9.]', '', 'g'), '')::numeric
+                    ELSE nullif(regexp_replace(c.p_typical_days_to_close, '[^0-9.]', '', 'g'), '')::numeric
+                  END)
+               )
+               AND
+               (
+                 (CASE
+                    WHEN position('-' in c.p_typical_days_to_close) > 0 THEN
+                      nullif(regexp_replace(split_part(c.p_typical_days_to_close, '-', 2), '[^0-9.]', '', 'g'), '')::numeric
+                    ELSE nullif(regexp_replace(c.p_typical_days_to_close, '[^0-9.]', '', 'g'), '')::numeric
+                  END) IS NULL
+                 OR c.closing_days_filter <= (CASE
+                    WHEN position('-' in c.p_typical_days_to_close) > 0 THEN
+                      nullif(regexp_replace(split_part(c.p_typical_days_to_close, '-', 2), '[^0-9.]', '', 'g'), '')::numeric
+                    ELSE nullif(regexp_replace(c.p_typical_days_to_close, '[^0-9.]', '', 'g'), '')::numeric
+                  END)
+               )
+             )
+           )
+      ) as closing_timeline_ok
 
     from candidates c
 ) c
@@ -584,6 +675,7 @@ raw_results as (
     (
       c.recourse_ok
       and c.amortization_ok
+      and c.program_type_ok
       and (
       -- [v3 change] if any capital stack toggle is on, require at least one capital stack type to match
         (not c.sizing_filter_provided) OR (coalesce(c.fits_senior,false) OR coalesce(c.fits_subordinate,false) OR coalesce(c.fits_equity,false))
@@ -605,6 +697,8 @@ raw_results as (
       and c.aum_ok
       and c.credit_ok
       and c.us_citizenship_ok
+      and c.pace_ok
+      and c.closing_timeline_ok
     )
     or (not p_match_only) -- if p_match_only is false, return all candidates
 ),
@@ -678,3 +772,13 @@ order by
   program_id
 limit p_limit offset p_offset;
 $$;
+
+
+select program_id, program_name, match_reasons
+from rpc_match_programs_v4(
+  p_deal_id := 35,
+  p_filters := '{"closing_timeline_days": 200}',
+  p_match_only := false,
+  p_limit := 20
+)
+where not matched or match_reasons ? 'closing_timeline_ok';
