@@ -1,8 +1,8 @@
 
-create or replace function rpc_match_programs_v5(
+create or replace function rpc_match_programs_v6(
   p_deal_id bigint,
   p_filters jsonb default '{}'::jsonb,   -- UI filters (recourse, amortization, capital stack sliders, etc.)
-  p_sort_by text default 'updated',      -- 'updated'|'score'|'check_size'|'sweet_spot'
+  p_sort_by text default 'recommended',  -- 'recommended'|'updated'|'score'|'check_size'|'sweet_spot'
   p_match_only boolean default true,     -- if true, only return programs that fully match all criteria; if false, return all candidates with match score
   p_limit int default 100,
   p_offset int default 0
@@ -25,7 +25,8 @@ returns table (
   capital_stack         text[],
   updated_at            timestamptz,
   extra                 jsonb,
-  sweet_spot_score      numeric          -- exposed for transparency and QA
+  sweet_spot_score      numeric,         -- exposed for transparency and QA
+  recommended_score     numeric          -- sweet_spot + recency bonus (default sort)
 )
 language sql
 security definer
@@ -40,6 +41,7 @@ as $$
    - [v2 change] Implement p_sort_by: 'updated' (default), 'score', 'check_size', and 'sweet_spot'
    - [v5 change] Replaced placeholder soft_spot_score with multi-dimensional sweet_spot_score for specificity ranking
    - [v2 change] Keep original comments; added v2 comments where changes were applied
+   - [v6 change] Added 'recommended' sort (new default) combining sweet_spot + recency bonus (1pt for <365d, +1pt for <90d)
 */
 
 with
@@ -805,24 +807,38 @@ results as (
              + least(5.0, 5.0 * (1.0 / greatest(rr.p_transaction_type_count, 1)))  -- specificity bonus
            else 0  -- no match
          end)
-    )::numeric as sweet_spot_score
+    )::numeric as sweet_spot_score,
+    -- Recency bonus for recommended sorting (max 2 points)
+    -- 1 point if updated in last 365 days, another 1 point if updated in last 90 days
+    (
+      case when rr.updated_at >= (now() - interval '365 days') then 1 else 0 end
+      + case when rr.updated_at >= (now() - interval '90 days') then 1 else 0 end
+    )::numeric as recency_bonus
   from raw_results rr
 ),
 
--- Rank per organization and pick the top 1 program for each organization.
--- tie-breakers: prefer matched=true, then higher match_score, then newer updated_at, then lower program_id
-ranked as (
+-- Compute recommended_score (sweet_spot + recency) in a separate CTE
+scored as (
   select
     r.*,
-    row_number() over (
-      partition by r.organization_id
-      order by
-        (case when r.matched then 1 else 0 end) desc,
-        r.match_score desc,
-        r.updated_at desc nulls last,
-        r.program_id
-    ) as rn
+    (r.sweet_spot_score + r.recency_bonus)::numeric as recommended_score
   from results r
+),
+
+-- Rank per organization and pick the top 1 program for each organization.
+-- tie-breakers: prefer matched=true, then higher recommended_score, then newer updated_at, then lower program_id
+ranked as (
+  select
+    s.*,
+    row_number() over (
+      partition by s.organization_id
+      order by
+        (case when s.matched then 1 else 0 end) desc,
+        s.recommended_score desc,
+        s.updated_at desc nulls last,
+        s.program_id
+    ) as rn
+  from scored s
 )
 
 -- final: one program per organization, then apply limit and final ordering
@@ -844,12 +860,13 @@ select
   capital_stack,
   updated_at,
   extra,
-  sweet_spot_score
+  sweet_spot_score,
+  recommended_score
 from ranked
 where rn = 1
 order by
-  -- [v2 change] Implement dynamic sort modes. Fallback to 'updated' preference if unknown.
-  case when p_sort_by in ('updated','score','check_size','sweet_spot') then 0 else 1 end,
+  -- [v2 change] Implement dynamic sort modes. Fallback to 'recommended' if unknown.
+  case when p_sort_by in ('recommended','updated','score','check_size','sweet_spot') then 0 else 1 end,
   -- 'score': matched desc, match_score desc, updated_at desc
   case when p_sort_by = 'score' then (case when matched then 1 else 0 end) end desc nulls last,
   case when p_sort_by = 'score' then match_score end desc nulls last,
@@ -858,11 +875,13 @@ order by
   case when p_sort_by = 'check_size' then check_size_diff end asc nulls last,
   case when p_sort_by = 'check_size' then (case when matched then 1 else 0 end) end desc nulls last,
   case when p_sort_by = 'check_size' then match_score end desc nulls last,
-  -- 'sweet_spot': specificity score that prefers programs narrowly focused on deals like this one
+  -- 'sweet_spot': specificity score only (no recency bonus)
   case when p_sort_by = 'sweet_spot' then sweet_spot_score end desc nulls last,
-  -- default 'updated': keep same preference as original
+  -- 'updated': sort by updated_at only
+  case when p_sort_by = 'updated' then updated_at end desc nulls last,
+  -- default 'recommended': sweet_spot + recency bonus (new default)
   (case when matched then 1 else 0 end) desc,
-  match_score desc,
+  recommended_score desc nulls last,
   updated_at desc nulls last,
   program_id
 limit p_limit offset p_offset;
@@ -876,7 +895,7 @@ $$;
 -- 1. Basic sweet_spot sorting - returns programs sorted by specificity score
 --    Programs that narrowly target deals like this one rank higher
 select *
-from rpc_match_programs_v5(
+from rpc_match_programs_v6(
   p_deal_id := 35,
   p_filters := '{}',
   p_sort_by := 'sweet_spot',
@@ -888,7 +907,7 @@ from rpc_match_programs_v5(
 --    Run both and compare which programs appear first
 -- Default sorting (by updated_at):
 select program_id, program_name, match_score, organization_name
-from rpc_match_programs_v5(
+from rpc_match_programs_v6(
   p_deal_id := 35,
   p_filters := '{}',
   p_sort_by := 'updated',
@@ -898,7 +917,7 @@ from rpc_match_programs_v5(
 
 -- Sweet spot sorting (by specificity):
 select program_id, program_name, match_score, organization_name
-from rpc_match_programs_v5(
+from rpc_match_programs_v6(
   p_deal_id := 35,
   p_filters := '{}',
   p_sort_by := 'sweet_spot',
@@ -908,7 +927,7 @@ from rpc_match_programs_v5(
 
 -- 3. Sweet spot with filters - combines advanced filters with specificity ranking
 select *
-from rpc_match_programs_v5(
+from rpc_match_programs_v6(
   p_deal_id := 35,
   p_filters := '{
     "program_type": "Debt Fund"
@@ -921,7 +940,7 @@ from rpc_match_programs_v5(
 -- 4. All candidates with sweet_spot (p_match_only := false)
 --    Shows all programs including near-misses, sorted by specificity
 select program_id, program_name, matched, match_score, match_reasons
-from rpc_match_programs_v5(
+from rpc_match_programs_v6(
   p_deal_id := 35,
   p_filters := '{}',
   p_sort_by := 'sweet_spot',
