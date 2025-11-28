@@ -24,7 +24,8 @@ returns table (
   maximum_check_size    numeric,
   capital_stack         text[],
   updated_at            timestamptz,
-  extra                 jsonb
+  extra                 jsonb,
+  sweet_spot_score      numeric          -- exposed for transparency and QA
 )
 language sql
 security definer
@@ -676,37 +677,15 @@ raw_results as (
         OR lower(nullif(trim(coalesce(c.p_accepts_pace_financing, '')), '')) = 'yes'
       ) as pace_ok,
 
-    -- Closing timeline filter (inline parsing of typical_days_to_close)
+    -- Closing timeline filter (reuses precomputed typical_days_min/max)
       (
         c.closing_days_filter IS NULL
         OR (
-             (c.p_typical_days_to_close IS NULL OR trim(c.p_typical_days_to_close) = '')
+             (typical_days_min IS NULL AND typical_days_max IS NULL)
              OR (
-               (
-                 (CASE
-                    WHEN position('-' in c.p_typical_days_to_close) > 0 THEN
-                      nullif(regexp_replace(split_part(c.p_typical_days_to_close, '-', 1), '[^0-9.]', '', 'g'), '')::numeric
-                    ELSE nullif(regexp_replace(c.p_typical_days_to_close, '[^0-9.]', '', 'g'), '')::numeric
-                  END) IS NULL
-                 OR c.closing_days_filter >= (CASE
-                    WHEN position('-' in c.p_typical_days_to_close) > 0 THEN
-                      nullif(regexp_replace(split_part(c.p_typical_days_to_close, '-', 1), '[^0-9.]', '', 'g'), '')::numeric
-                    ELSE nullif(regexp_replace(c.p_typical_days_to_close, '[^0-9.]', '', 'g'), '')::numeric
-                  END)
-               )
+               (typical_days_min IS NULL OR c.closing_days_filter >= typical_days_min)
                AND
-               (
-                 (CASE
-                    WHEN position('-' in c.p_typical_days_to_close) > 0 THEN
-                      nullif(regexp_replace(split_part(c.p_typical_days_to_close, '-', 2), '[^0-9.]', '', 'g'), '')::numeric
-                    ELSE nullif(regexp_replace(c.p_typical_days_to_close, '[^0-9.]', '', 'g'), '')::numeric
-                  END) IS NULL
-                 OR c.closing_days_filter <= (CASE
-                    WHEN position('-' in c.p_typical_days_to_close) > 0 THEN
-                      nullif(regexp_replace(split_part(c.p_typical_days_to_close, '-', 2), '[^0-9.]', '', 'g'), '')::numeric
-                    ELSE nullif(regexp_replace(c.p_typical_days_to_close, '[^0-9.]', '', 'g'), '')::numeric
-                  END)
-               )
+               (typical_days_max IS NULL OR c.closing_days_filter <= typical_days_max)
              )
            )
       ) as closing_timeline_ok
@@ -865,7 +844,8 @@ select
   maximum_check_size,
   capital_stack,
   updated_at,
-  extra
+  extra,
+  sweet_spot_score
 from ranked
 where rn = 1
 order by
