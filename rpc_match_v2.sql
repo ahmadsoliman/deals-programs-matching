@@ -280,7 +280,7 @@ raw_results as (
     + (case when credit_ok then 1 else 0 end)
     + (case when us_citizenship_ok then 1 else 0 end)
     + (case when pace_ok then 1 else 0 end)
-    + (case when closing_timeline_ok then 1 else 0 end)
+    + (case when ctl.closing_timeline_ok then 1 else 0 end)
     -- 21.0  -- total number of boolean checks (now 3 capital stack filters + 18 other checks)
     )::integer as match_score,
   -- final matched decision: must satisfy all boolean checks below (plus recourse/amortization)
@@ -340,7 +340,7 @@ raw_results as (
              ('credit_ok',               credit_ok),
              ('us_citizenship_ok',       us_citizenship_ok),
              ('pace_ok',                 pace_ok),
-             ('closing_timeline_ok',     closing_timeline_ok)
+             ('closing_timeline_ok',     ctl.closing_timeline_ok)
            ) as t(key, value)
       where value <> true
     ) as match_reasons,
@@ -675,23 +675,22 @@ raw_results as (
       (
         coalesce(c.accepts_pace_filter, false) IS DISTINCT FROM true
         OR lower(nullif(trim(coalesce(c.p_accepts_pace_financing, '')), '')) = 'yes'
-      ) as pace_ok,
-
-    -- Closing timeline filter (reuses precomputed typical_days_min/max)
-      (
-        c.closing_days_filter IS NULL
-        OR (
-             (typical_days_min IS NULL AND typical_days_max IS NULL)
-             OR (
-               (typical_days_min IS NULL OR c.closing_days_filter >= typical_days_min)
-               AND
-               (typical_days_max IS NULL OR c.closing_days_filter <= typical_days_max)
-             )
-           )
-      ) as closing_timeline_ok
+      ) as pace_ok
 
     from candidates c
-) c
+) c,
+-- Closing timeline filter (computed here to reuse precomputed typical_days_min/max from inner query)
+lateral (select (
+  c.closing_days_filter IS NULL
+  OR (
+       (c.typical_days_min IS NULL AND c.typical_days_max IS NULL)
+       OR (
+         (c.typical_days_min IS NULL OR c.closing_days_filter >= c.typical_days_min)
+         AND
+         (c.typical_days_max IS NULL OR c.closing_days_filter <= c.typical_days_max)
+       )
+     )
+) as closing_timeline_ok) ctl
   where
   -- only return programs that satisfy the filtering boolean set (you can remove this WHERE to return near-misses)
     (
@@ -720,7 +719,7 @@ raw_results as (
       and c.credit_ok
       and c.us_citizenship_ok
       and c.pace_ok
-      and c.closing_timeline_ok
+      and ctl.closing_timeline_ok
     )
     or (not p_match_only) -- if p_match_only is false, return all candidates
 ),
