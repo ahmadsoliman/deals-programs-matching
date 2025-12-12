@@ -27,7 +27,50 @@ SECURITY DEFINER
 LANGUAGE sql
 STABLE
 AS $$
-WITH base AS (
+-- Pre-filter shares with common deal filters applied once
+WITH relevant_shares AS (
+  SELECT
+    sc.contact_id,
+    s.id AS share_id,
+    s.status,
+    s.sent_at,
+    s.created_at,
+    s.updated_at,
+    s.updated_by,
+    d.id AS deal_id,
+    d.title AS deal_title,
+    d.stage AS deal_stage,
+    d.status AS deal_status,
+    d.owner_user_id AS deal_owner_user_id,
+    d.value AS deal_value,
+    d.currency AS deal_currency,
+    d.organization_id AS deal_organization_id,
+    d.created_at AS deal_created_at,
+    d.updated_at AS deal_updated_at,
+    d.city_town_village_locality_of_property_address,
+    d.state_county_of_property_address
+  FROM public.share_contacts sc
+  JOIN public.shares s ON s.id = sc.share_id
+  JOIN public.deals d ON d.id = s.deal_id
+  WHERE (p_consider_open_deals_only IS NOT TRUE OR d.status = 'open')
+    AND ((p_stage_ids IS NULL OR cardinality(p_stage_ids) = 0) OR d.stage::numeric = ANY(p_stage_ids))
+    AND (p_owner_user_id IS NULL OR d.owner_user_id = p_owner_user_id)
+),
+-- Aggregate scores per contact using relevant_shares
+contact_scores AS (
+  SELECT
+    rs.contact_id,
+    SUM(CASE rs.status
+      WHEN 'sent' THEN 2
+      WHEN 'interested' THEN 1
+      WHEN 'shortlisted' THEN 1
+      ELSE 0
+    END)::int AS share_score,
+    COUNT(*) FILTER (WHERE rs.status IN ('sent','interested','shortlisted'))::int AS shares_needs_attention
+  FROM relevant_shares rs
+  GROUP BY rs.contact_id
+),
+base AS (
   SELECT
     c.id,
     c.organization_id,
@@ -40,34 +83,10 @@ WITH base AS (
     c.timezone,
     c.notes,
     c.pipedrive_id,
-    COALESCE((
-      SELECT sum(
-        CASE s.status
-          WHEN 'sent' THEN 2
-          WHEN 'interested' THEN 1
-          WHEN 'shortlisted' THEN 1
-          ELSE 0
-        END)
-      FROM public.share_contacts sc
-      JOIN public.shares s ON s.id = sc.share_id
-      JOIN public.deals d ON d.id = s.deal_id
-      WHERE sc.contact_id = c.id
-        AND (p_consider_open_deals_only IS NOT TRUE OR d.status = 'open')
-        AND ((p_stage_ids IS NULL OR cardinality(p_stage_ids) = 0) OR d.stage::numeric = ANY(p_stage_ids))
-        AND (p_owner_user_id IS NULL OR d.owner_user_id = p_owner_user_id)
-    ), 0)::int AS share_score,
-    COALESCE((
-      SELECT count(*)
-      FROM public.share_contacts sc2
-      JOIN public.shares s2 ON s2.id = sc2.share_id
-      JOIN public.deals d2 ON d2.id = s2.deal_id
-      WHERE sc2.contact_id = c.id
-        AND (p_consider_open_deals_only IS NOT TRUE OR d2.status = 'open')
-        AND ((p_stage_ids IS NULL OR cardinality(p_stage_ids) = 0) OR d2.stage::numeric = ANY(p_stage_ids))
-        AND (p_owner_user_id IS NULL OR d2.owner_user_id = p_owner_user_id)
-        AND s2.status = ANY (ARRAY['sent','interested','shortlisted'])
-    ), 0)::int AS shares_needs_attention
+    COALESCE(cs.share_score, 0) AS share_score,
+    COALESCE(cs.shares_needs_attention, 0) AS shares_needs_attention
   FROM public.contacts c
+  LEFT JOIN contact_scores cs ON cs.contact_id = c.id
   WHERE (p_contact_name IS NULL OR COALESCE(c.name,'') ILIKE '%' || p_contact_name || '%')
 ),
 filtered AS (
@@ -90,44 +109,39 @@ paged AS (
 ),
 shares_for_contact AS (
   SELECT
-    c.id AS contact_id,
+    p.id AS contact_id,
     jsonb_agg(
       jsonb_build_object(
-        'share_id', s.id,
-        'share_status', s.status,
-        'share_sent_at', s.sent_at,
-        'share_created_at', s.created_at,
-        'share_updated_at', s.updated_at,
-        'share_updated_by', s.updated_by,
-        'score', CASE s.status WHEN 'sent' THEN 2 WHEN 'interested' THEN 1 WHEN 'shortlisted' THEN 1 ELSE 0 END,
+        'share_id', rs.share_id,
+        'share_status', rs.status,
+        'share_sent_at', rs.sent_at,
+        'share_created_at', rs.created_at,
+        'share_updated_at', rs.updated_at,
+        'share_updated_by', rs.updated_by,
+        'score', CASE rs.status WHEN 'sent' THEN 2 WHEN 'interested' THEN 1 WHEN 'shortlisted' THEN 1 ELSE 0 END,
         'deal', jsonb_build_object(
-          'deal_id', d.id,
-          'title', d.title,
-          'stage', d.stage,
-          'status', d.status,
-          'owner_user_id', d.owner_user_id,
-          'value', d.value,
-          'currency', d.currency,
-          'org_id', d.organization_id,
-          'created_at', d.created_at,
-          'updated_at', d.updated_at,
-          'city_town_village_locality_of_property_address', d.city_town_village_locality_of_property_address,
-          'state_county_of_property_address', d.state_county_of_property_address
+          'deal_id', rs.deal_id,
+          'title', rs.deal_title,
+          'stage', rs.deal_stage,
+          'status', rs.deal_status,
+          'owner_user_id', rs.deal_owner_user_id,
+          'value', rs.deal_value,
+          'currency', rs.deal_currency,
+          'org_id', rs.deal_organization_id,
+          'created_at', rs.deal_created_at,
+          'updated_at', rs.deal_updated_at,
+          'city_town_village_locality_of_property_address', rs.city_town_village_locality_of_property_address,
+          'state_county_of_property_address', rs.state_county_of_property_address
         )
       )
       ORDER BY
-        CASE s.status WHEN 'sent' THEN 2 WHEN 'interested' THEN 1 WHEN 'shortlisted' THEN 1 ELSE 0 END DESC,
-        COALESCE(s.updated_at, s.created_at) DESC
+        CASE rs.status WHEN 'sent' THEN 2 WHEN 'interested' THEN 1 WHEN 'shortlisted' THEN 1 ELSE 0 END DESC,
+        COALESCE(rs.updated_at, rs.created_at) DESC
     ) AS shares
-  FROM paged c
-  JOIN public.share_contacts sc ON sc.contact_id = c.id
-  JOIN public.shares s ON s.id = sc.share_id
-  JOIN public.deals d ON d.id = s.deal_id
-  WHERE s.status = ANY (ARRAY['sent','interested','shortlisted'])
-    AND (p_consider_open_deals_only IS NOT TRUE OR d.status = 'open')
-    AND ((p_stage_ids IS NULL OR cardinality(p_stage_ids) = 0) OR d.stage::numeric = ANY(p_stage_ids))
-    AND (p_owner_user_id IS NULL OR d.owner_user_id = p_owner_user_id)
-  GROUP BY c.id
+  FROM paged p
+  JOIN relevant_shares rs ON rs.contact_id = p.id
+  WHERE rs.status IN ('sent','interested','shortlisted')
+  GROUP BY p.id
 )
 SELECT
   counted.total_count,
