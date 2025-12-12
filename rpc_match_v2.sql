@@ -1,11 +1,8 @@
--- v2: safe, backward-compatible variant of rpc_match_programs with improved null/empty handling,
--- asset_type id-based matching, open-ended sizing constraints, US citizenship permissive when unknown,
--- amortization/recourse edge cases, parsing guards, and p_sort_by implementation.
--- Original comments and structure retained; changes are annotated with -- [v2 change: ...]
-create or replace function rpc_match_programs(
+
+create or replace function rpc_match_programs_v6(
   p_deal_id bigint,
   p_filters jsonb default '{}'::jsonb,   -- UI filters (recourse, amortization, capital stack sliders, etc.)
-  p_sort_by text default 'updated',      -- 'updated'|'score'|'check_size'|'soft_spot'
+  p_sort_by text default 'recommended',  -- 'recommended'|'updated'|'score'|'check_size'|'sweet_spot'
   p_match_only boolean default true,     -- if true, only return programs that fully match all criteria; if false, return all candidates with match score
   p_limit int default 100,
   p_offset int default 0
@@ -27,7 +24,9 @@ returns table (
   maximum_check_size    numeric,
   capital_stack         text[],
   updated_at            timestamptz,
-  extra                 jsonb
+  extra                 jsonb,
+  sweet_spot_score      numeric,         -- exposed for transparency and QA
+  recommended_score     numeric          -- sweet_spot + recency bonus (default sort)
 )
 language sql
 security definer
@@ -39,8 +38,10 @@ as $$
    - [v2 change] Sizing comparisons are open-ended when program min/max are NULL (ignore missing bound)
    - [v2 change] US citizenship logic is permissive when unknown
    - [v2 change] Money parsing avoids forcing 0 on parse failures; use permissive logic explicitly
-   - [v2 change] Implement p_sort_by: 'updated' (default), 'score', 'check_size', and 'soft_spot' (starter heuristic)
+   - [v2 change] Implement p_sort_by: 'updated' (default), 'score', 'check_size', and 'sweet_spot'
+   - [v5 change] Replaced placeholder soft_spot_score with multi-dimensional sweet_spot_score for specificity ranking
    - [v2 change] Keep original comments; added v2 comments where changes were applied
+   - [v6 change] Added 'recommended' sort (new default) combining sweet_spot + recency bonus (1pt for <365d, +1pt for <90d)
 */
 
 with
@@ -61,6 +62,10 @@ filters as (
   select
     (pf -> 'recourse')::jsonb                         as recourse_filter_json,   -- may be array or null
     (pf ->> 'amortization')                           as amortization_filter,
+    nullif(trim(coalesce(pf ->> 'program_type', '')), '') as program_type_filter,
+    ((pf ->> 'us_citizenship_filter')::boolean)       as us_citizenship_filter,
+    ((pf ->> 'accepts_pace_filter')::boolean)         as accepts_pace_filter,
+    nullif(trim(coalesce(pf ->> 'closing_timeline_days', '')), '')::numeric as closing_days_filter,
     -- [v3 change] New capital stack slider inputs (percentages as integers, e.g. 46 = 46%)
     nullif(trim(coalesce(pf ->> 'Senior_input', '')), '')::numeric       as senior_pct,
     nullif(trim(coalesce(pf ->> 'Subordinate_input', '')), '')::numeric  as subordinate_pct,
@@ -87,11 +92,13 @@ candidates as (
   select
     p.id                                       as p_id,
     p.name                                     as p_name,
+    p.program_type                              as p_program_type,
     p.organization_id                          as p_org_id,
     o.name                                     as p_org_name,
     o.hq_location                              as p_org_location,
     p.recourse                                 as p_recourse,
     p.typical_amortization                     as p_typical_amortization,
+    p.typical_days_to_close                    as p_typical_days_to_close,
     p.minimum_check_size                       as p_minimum_check_size,
     p.maximum_check_size                       as p_maximum_check_size,
     p.capital_stack                            as p_capital_stack,
@@ -132,6 +139,7 @@ candidates as (
     p.sponsor_aum_req                                 as p_sponsor_aum_req,
     p.min_credit_score                                as p_min_credit_score,
     p.us_citizenship_required                         as p_us_citizenship_required,
+    p.accepts_pace_financing                          as p_accepts_pace_financing,
     pe.extra                                          as p_extra,
 
     -- deal fields (explicit aliases)
@@ -162,6 +170,7 @@ candidates as (
     d.net_worth                                             as d_net_worth,
     d.net_worth_num                                         as d_net_worth_num,
     d.value                                                 as d_value,
+    d.project_budget                                        as d_project_budget,
     d.liquidity                                             as d_liquidity,
     d.liquidity_num                                         as d_liquidity_num,
     d.assets_under_management                               as d_assets_under_management,
@@ -173,6 +182,10 @@ candidates as (
     -- [v2 change] Keep JSON for recourse so we can detect empty array vs null
     f.recourse_filter_json,
     f.amortization_filter,
+    f.program_type_filter,
+    f.us_citizenship_filter,
+    f.accepts_pace_filter,
+    f.closing_days_filter,
     -- [v3 change] New capital stack filter values
     f.senior_pct,
     f.subordinate_pct,
@@ -187,7 +200,34 @@ candidates as (
     f.eq_cogp_cb,
     f.eq_lp_cb,
     f.eq_pace_cb,
-    f.eq_glb_cb
+    f.eq_glb_cb,
+
+    -- [v5 change] Sweet spot scoring helper columns
+    -- Check size range width (NULL if both bounds missing)
+    (case
+       when p.minimum_check_size is null and p.maximum_check_size is null then null
+       when p.minimum_check_size is null then p.maximum_check_size  -- treat as 0 to max
+       when p.maximum_check_size is null then null  -- open-ended, can't compute width
+       else p.maximum_check_size - p.minimum_check_size
+     end) as p_check_size_range_width,
+    -- Asset type count for program
+    (
+      select count(*)::int
+      from program_asset_types pat
+      where pat.program_id = p.id
+    ) as p_asset_type_count,
+    -- Location count for program (number of entries in target_property_locations jsonb)
+    -- Handle both object (count keys) and array (count elements) formats
+    (case
+       when p.target_property_locations is null then 0
+       when jsonb_typeof(p.target_property_locations) = 'object' then
+         (select count(*)::int from jsonb_object_keys(p.target_property_locations))
+       when jsonb_typeof(p.target_property_locations) = 'array' then
+         jsonb_array_length(p.target_property_locations)
+       else 0
+     end) as p_location_count,
+    -- Transaction type count for program
+    cardinality(coalesce(p.transaction_types, ARRAY[]::text[])) as p_transaction_type_count
 
   from programs p
   left join organizations o on p.organization_id = o.id
@@ -219,10 +259,11 @@ raw_results as (
     (
       (case when recourse_ok then 1 else 0 end)
     + (case when amortization_ok then 1 else 0 end)
+    + (case when program_type_ok then 1 else 0 end)
     -- [v3 change] Updated to use new capital stack filters (Senior, Subordinate, Equity)
-    + (case when (not sizing_filter_provided) or (fits_senior and sizing_filter_provided) then 1 else 0 end)
-    + (case when (not sizing_filter_provided) or (fits_subordinate and sizing_filter_provided) then 1 else 0 end)
-    + (case when (not sizing_filter_provided) or (fits_equity and sizing_filter_provided) then 1 else 0 end)
+    + (case when (not sizing_filter_provided) or (coalesce(fits_senior,false) and sizing_filter_provided) then 1 else 0 end)
+    + (case when (not sizing_filter_provided) or (coalesce(fits_subordinate,false) and sizing_filter_provided) then 1 else 0 end)
+    + (case when (not sizing_filter_provided) or (coalesce(fits_equity,false) and sizing_filter_provided) then 1 else 0 end)
 ----------------------- END of FILTERS, BEGIN RULES -----------------------
     + (case when sizing_ok then 1 else 0 end)
     + (case when financing_ok then 1 else 0 end)
@@ -240,6 +281,8 @@ raw_results as (
     + (case when aum_ok then 1 else 0 end)
     + (case when credit_ok then 1 else 0 end)
     + (case when us_citizenship_ok then 1 else 0 end)
+    + (case when pace_ok then 1 else 0 end)
+    + (case when ctl.closing_timeline_ok then 1 else 0 end)
     -- 21.0  -- total number of boolean checks (now 3 capital stack filters + 18 other checks)
     )::integer as match_score,
   -- final matched decision: must satisfy all boolean checks below (plus recourse/amortization)
@@ -248,9 +291,9 @@ raw_results as (
       and amortization_ok
       and (
         -- [v3 change] A program matches if it matches ANY of the enabled capital stack types
-        (not sizing_filter_provided) OR (fits_senior OR fits_subordinate OR fits_equity)
+        (not sizing_filter_provided) OR (coalesce(fits_senior,false) OR coalesce(fits_subordinate,false) OR coalesce(fits_equity,false))
       )
------------------------ END of FILTERS, BEGIN RULES -----------------------
+----------------------- END OF FILTERS, BEGIN RULES -----------------------
       and sizing_ok
       and financing_ok
       and location_ok
@@ -275,11 +318,13 @@ raw_results as (
              values
              ('recourse_ok',             recourse_ok),
              ('amortization_ok',         amortization_ok),
+             ('program_type_ok',         program_type_ok),
              ('sizing_filter_provided',  sizing_filter_provided),
-             ('capital_stack_ok',        (not sizing_filter_provided) OR (fits_senior OR fits_subordinate OR fits_equity)),
-             ('fits_senior',             (NOT coalesce(senior_toggle, false)) OR fits_senior),
-             ('fits_subordinate',        (NOT coalesce(subordinate_toggle, false)) OR fits_subordinate),
-             ('fits_equity',             (NOT coalesce(equity_toggle, false)) OR fits_equity),
+             ('capital_stack_ok',        (not sizing_filter_provided) OR (coalesce(fits_senior,false) OR coalesce(fits_subordinate,false) OR coalesce(fits_equity,false))),
+             -- Show fits_* as NULL when the corresponding toggle is off (instead of auto-true)
+             ('fits_senior',             case when senior_toggle then fits_senior else null end),
+             ('fits_subordinate',        case when subordinate_toggle then fits_subordinate else null end),
+             ('fits_equity',             case when equity_toggle then fits_equity else null end),
              ('sizing_ok',               sizing_ok),
              ('financing_ok',            financing_ok),
              ('location_ok',             location_ok),
@@ -295,28 +340,63 @@ raw_results as (
              ('liquidity_ratio_ok',      liquidity_ratio_ok),
              ('aum_ok',                  aum_ok),
              ('credit_ok',               credit_ok),
-             ('us_citizenship_ok',       us_citizenship_ok)
+             ('us_citizenship_ok',       us_citizenship_ok),
+             ('pace_ok',                 pace_ok),
+             ('closing_timeline_ok',     ctl.closing_timeline_ok)
            ) as t(key, value)
       where value <> true
     ) as match_reasons,
 
     -- [v2 change] Provide computed helper values for sorting (not exposed in result set)
     -- check_size_diff: distance from deal value to program range center (smaller is better)
-    -- soft_spot_score is computed in the next CTE so it can reference the matched alias safely
+    -- sweet_spot_score is computed in the next CTE so it can reference the matched alias safely
     -- These are used only in ORDER BY below.
     (case
        when c.p_minimum_check_size is null and c.p_maximum_check_size is null then null
-       when c.p_minimum_check_size is null then abs(coalesce(c.d_value,0) - c.p_maximum_check_size)
-       when c.p_maximum_check_size is null then abs(coalesce(c.d_value,0) - c.p_minimum_check_size)
-       else abs(coalesce(c.d_value,0) - ((c.p_minimum_check_size + c.p_maximum_check_size)/2.0))
+       when c.p_minimum_check_size is null then abs(coalesce(c.d_project_budget,0) - c.p_maximum_check_size)
+       when c.p_maximum_check_size is null then abs(coalesce(c.d_project_budget,0) - c.p_minimum_check_size)
+       else abs(coalesce(c.d_project_budget,0) - ((c.p_minimum_check_size + c.p_maximum_check_size)/2.0))
      end) as check_size_diff,
-    recency_rank
+    recency_rank,
+    -- [v5 change] Sweet spot scoring helper columns passed through
+    c.p_check_size_range_width,
+    c.p_asset_type_count,
+    c.p_location_count,
+    c.p_transaction_type_count,
+    c.p_minimum_check_size,
+    c.p_maximum_check_size,
+    c.d_project_budget,
+    c.p_program_asset_type_ids,
+    c.d_asset_type_ids,
+    c.p_transaction_types,
+    c.d_financing_type,
+    location_ok,
+    asset_type_ok,
+    financing_ok
   from (
     -- inner-most: compute every boolean as in your previous implementation
     select
       c.*,
 
-      -- [v2 change] Provide a simple recency rank per entire candidate set for soft_spot
+      -- Parsed typical days to close bounds
+      (
+        CASE
+          WHEN c.p_typical_days_to_close IS NULL THEN NULL
+          WHEN position('-' in c.p_typical_days_to_close) > 0 THEN
+            nullif(regexp_replace(split_part(c.p_typical_days_to_close, '-', 1), '[^0-9.]', '', 'g'), '')::numeric
+          ELSE nullif(regexp_replace(c.p_typical_days_to_close, '[^0-9.]', '', 'g'), '')::numeric
+        END
+      ) as typical_days_min,
+      (
+        CASE
+          WHEN c.p_typical_days_to_close IS NULL THEN NULL
+          WHEN position('-' in c.p_typical_days_to_close) > 0 THEN
+            nullif(regexp_replace(split_part(c.p_typical_days_to_close, '-', 2), '[^0-9.]', '', 'g'), '')::numeric
+          ELSE nullif(regexp_replace(c.p_typical_days_to_close, '[^0-9.]', '', 'g'), '')::numeric
+        END
+      ) as typical_days_max,
+
+      -- [v2 change] Provide a simple recency rank per entire candidate set for sweet_spot
       row_number() over (order by c.p_updated_at desc nulls last, c.p_id) as recency_rank,
 
     -- program filters from UI
@@ -347,11 +427,17 @@ raw_results as (
          )
       end) as amortization_ok,
 
+    -- program_type filter (exact match, case-insensitive)
+      (
+        c.program_type_filter IS NULL
+        OR lower(coalesce(c.p_program_type,'')) = lower(c.program_type_filter)
+      ) as program_type_ok,
+
     -- [v3 change] New capital stack matching logic with toggles, checkboxes, and sliders
     -- Calculate check amounts for each slider (percentage as fraction * deal value)
-      ((coalesce(c.senior_pct,0) / 100.0) * coalesce(c.d_value,0)) as senior_check_amount,
-      ((coalesce(c.subordinate_pct,0) / 100.0) * coalesce(c.d_value,0)) as subordinate_check_amount,
-      ((coalesce(c.equity_pct,0) / 100.0) * coalesce(c.d_value,0)) as equity_check_amount,
+      ((coalesce(c.senior_pct,0) / 100.0) * coalesce(c.d_project_budget,0)) as senior_check_amount,
+      ((coalesce(c.subordinate_pct,0) / 100.0) * coalesce(c.d_project_budget,0)) as subordinate_check_amount,
+      ((coalesce(c.equity_pct,0) / 100.0) * coalesce(c.d_project_budget,0)) as equity_check_amount,
 
     -- whether user supplied any capital stack filter (any toggle + at least one enabled checkbox)
       (
@@ -362,8 +448,8 @@ raw_results as (
 
     -- [v3 change] fits within min/max check size (legacy sizing_ok for backward compatibility)
       -- [v2 change] Open-ended bounds: NULL program min/max means "ignore that bound"
-      ( (c.p_minimum_check_size IS NULL OR coalesce(c.d_value,0) >= c.p_minimum_check_size)
-        AND (c.p_maximum_check_size IS NULL OR coalesce(c.d_value,0) <= c.p_maximum_check_size)
+      ( (c.p_minimum_check_size IS NULL OR coalesce(c.d_project_budget,0) >= c.p_minimum_check_size)
+        AND (c.p_maximum_check_size IS NULL OR coalesce(c.d_project_budget,0) <= c.p_maximum_check_size)
       ) as sizing_ok,
 
     -- [v3 change] Senior capital stack matching
@@ -371,8 +457,8 @@ raw_results as (
     -- Sizing: if slider is 0/null, match all; otherwise check size constraints and LTC
       (
         CASE
-          -- If senior toggle is off, always match (neutral)
-          WHEN NOT c.senior_toggle THEN true
+          -- If senior toggle is off, treat as not applicable (NULL) so it doesn't auto-pass the OR
+          WHEN NOT c.senior_toggle THEN NULL
           -- If toggle is on but no checkboxes are checked, no match
           WHEN NOT (c.senior_loc_cb OR c.senior_scm_cb) THEN false
           -- Require at least one of the checked capital stack options to exist on the program
@@ -385,10 +471,10 @@ raw_results as (
             (c.senior_pct IS NULL OR c.senior_pct = 0)
             OR (
               -- Otherwise check size constraints and LTC (skip size checks when deal value missing)
-              (c.d_value IS NULL
+              (c.d_project_budget IS NULL
                 OR (
-                  (c.p_minimum_check_size IS NULL OR ((c.senior_pct / 100.0) * c.d_value) >= c.p_minimum_check_size)
-                  AND (c.p_maximum_check_size IS NULL OR ((c.senior_pct / 100.0) * c.d_value) <= c.p_maximum_check_size)
+                  (c.p_minimum_check_size IS NULL OR ((c.senior_pct / 100.0) * c.d_project_budget) >= c.p_minimum_check_size)
+                  AND (c.p_maximum_check_size IS NULL OR ((c.senior_pct / 100.0) * c.d_project_budget) <= c.p_maximum_check_size)
                 )
               )
               AND (c.p_maximum_ltc IS NULL OR (c.senior_pct / 100.0) <= c.p_maximum_ltc)
@@ -400,7 +486,7 @@ raw_results as (
     -- [v3 change] Subordinate capital stack matching
       (
         CASE
-          WHEN NOT c.subordinate_toggle THEN true
+          WHEN NOT c.subordinate_toggle THEN NULL
           WHEN NOT (c.sub_mezz_cb OR c.sub_pref_cb) THEN false
           -- Require at least one checked subordinate capital stack value on the program
           WHEN NOT (
@@ -411,10 +497,10 @@ raw_results as (
             (c.subordinate_pct IS NULL OR c.subordinate_pct = 0)
             OR (
               -- Otherwise enforce check size comparisons; skip size checks if deal value missing
-              c.d_value IS NULL
+              c.d_project_budget IS NULL
               OR (
-                (c.p_minimum_check_size IS NULL OR ((c.subordinate_pct / 100.0) * c.d_value) >= c.p_minimum_check_size)
-                AND (c.p_maximum_check_size IS NULL OR ((c.subordinate_pct / 100.0) * c.d_value) <= c.p_maximum_check_size)
+                (c.p_minimum_check_size IS NULL OR ((c.subordinate_pct / 100.0) * c.d_project_budget) >= c.p_minimum_check_size)
+                AND (c.p_maximum_check_size IS NULL OR ((c.subordinate_pct / 100.0) * c.d_project_budget) <= c.p_maximum_check_size)
               )
             )
           )
@@ -424,7 +510,7 @@ raw_results as (
     -- [v3 change] Equity capital stack matching
       (
         CASE
-          WHEN NOT c.equity_toggle THEN true
+          WHEN NOT c.equity_toggle THEN NULL
           WHEN NOT (c.eq_cogp_cb OR c.eq_lp_cb OR c.eq_pace_cb OR c.eq_glb_cb) THEN false
           -- Require at least one checked equity capital stack value on the program
           WHEN NOT (
@@ -437,15 +523,17 @@ raw_results as (
             (c.equity_pct IS NULL OR c.equity_pct = 0)
             OR (
               -- Otherwise enforce check size comparisons; skip size checks if deal value missing
-              c.d_value IS NULL
+              c.d_project_budget IS NULL
               OR (
-                (c.p_minimum_check_size IS NULL OR ((c.equity_pct / 100.0) * c.d_value) >= c.p_minimum_check_size)
-                AND (c.p_maximum_check_size IS NULL OR ((c.equity_pct / 100.0) * c.d_value) <= c.p_maximum_check_size)
+                (c.p_minimum_check_size IS NULL OR ((c.equity_pct / 100.0) * c.d_project_budget) >= c.p_minimum_check_size)
+                AND (c.p_maximum_check_size IS NULL OR ((c.equity_pct / 100.0) * c.d_project_budget) <= c.p_maximum_check_size)
               )
             )
           )
         END
       ) as fits_equity,
+
+
 ----------------------- END of FILTERS, BEGIN RULES -----------------------
 
     -- financing_type: if p_transaction_types is empty or null, the program matches all financing types; otherwise, arrays must overlap
@@ -530,8 +618,8 @@ raw_results as (
               c.p_min_net_worth_ratio IS NULL
               OR parse_money_to_numeric(c.p_min_net_worth_ratio) IS NULL
               OR (
-                c.d_value IS NOT NULL
-                AND (c.d_net_worth_num * c.d_value) >= parse_money_to_numeric(c.p_min_net_worth_ratio)
+                c.d_project_budget IS NOT NULL
+                AND (c.d_net_worth_num * c.d_project_budget) >= parse_money_to_numeric(c.p_min_net_worth_ratio)
               )
             )
           )
@@ -550,8 +638,8 @@ raw_results as (
         OR (c.p_min_liquidity_ratio IS NULL)
         OR parse_money_to_numeric(c.p_min_liquidity_ratio) IS NULL
         OR (
-          c.d_value IS NOT NULL
-          AND (c.d_liquidity_num * c.d_value) > parse_money_to_numeric(c.p_min_liquidity_ratio)
+          c.d_project_budget IS NOT NULL
+          AND (c.d_liquidity_num * c.d_project_budget) > parse_money_to_numeric(c.p_min_liquidity_ratio)
         )
       ) as liquidity_ratio_ok,
 
@@ -570,24 +658,50 @@ raw_results as (
         OR (c.d_credit_score_num >= c.p_min_credit_score)
       ) as credit_ok,
 
-    -- US citizenship: [v2 change] permissive when unknown (deal NULL => ok);
-    -- ok if program does not require; if program requires, then deal must be true.
+    -- US citizenship:
+    -- program requirement still enforced; optional UI filter only when user asks for it.
       (
-        (coalesce(c.p_us_citizenship_required, false) = false)
-        OR (c.d_us_citizenship IS NULL)
-        OR (c.d_us_citizenship IS TRUE AND c.p_us_citizenship_required IS TRUE)
-      ) as us_citizenship_ok
+        (
+          (coalesce(c.p_us_citizenship_required, false) = false)
+          OR (c.d_us_citizenship IS NULL)
+          OR (c.d_us_citizenship IS TRUE AND c.p_us_citizenship_required IS TRUE)
+        )
+        AND
+        (
+          coalesce(c.us_citizenship_filter, false) IS DISTINCT FROM true
+          OR c.d_us_citizenship IS TRUE
+        )
+      ) as us_citizenship_ok,
+
+    -- Accepts PACE standalone filter (independent of capital stack toggles)
+      (
+        coalesce(c.accepts_pace_filter, false) IS DISTINCT FROM true
+        OR lower(nullif(trim(coalesce(c.p_accepts_pace_financing, '')), '')) = 'yes'
+      ) as pace_ok
 
     from candidates c
-) c
+) c,
+-- Closing timeline filter (computed here to reuse precomputed typical_days_min/max from inner query)
+lateral (select (
+  c.closing_days_filter IS NULL
+  OR (
+       (c.typical_days_min IS NULL AND c.typical_days_max IS NULL)
+       OR (
+         (c.typical_days_min IS NULL OR c.closing_days_filter >= c.typical_days_min)
+         AND
+         (c.typical_days_max IS NULL OR c.closing_days_filter <= c.typical_days_max)
+       )
+     )
+) as closing_timeline_ok) ctl
   where
   -- only return programs that satisfy the filtering boolean set (you can remove this WHERE to return near-misses)
     (
       c.recourse_ok
       and c.amortization_ok
+      and c.program_type_ok
       and (
       -- [v3 change] if any capital stack toggle is on, require at least one capital stack type to match
-        (not c.sizing_filter_provided) OR (c.fits_senior OR c.fits_subordinate OR c.fits_equity)
+        (not c.sizing_filter_provided) OR (coalesce(c.fits_senior,false) OR coalesce(c.fits_subordinate,false) OR coalesce(c.fits_equity,false))
       )
 ----------------------- END of FILTERS, BEGIN RULES -----------------------
       and c.sizing_ok
@@ -606,36 +720,125 @@ raw_results as (
       and c.aum_ok
       and c.credit_ok
       and c.us_citizenship_ok
+      and c.pace_ok
+      and ctl.closing_timeline_ok
     )
     or (not p_match_only) -- if p_match_only is false, return all candidates
 ),
 
--- derive soft_spot_score now that matched/match_score aliases are available
+-- [v5 change] Compute sweet_spot_score: multi-dimensional specificity scoring
+-- Higher scores for programs that narrowly target deals like this one
 results as (
   select
     rr.*,
     (
-      (case when (rr.recency_rank <= 100) then 1 else 0 end)
-      + (case when rr.matched then 2 else 0 end)
-      + least(rr.match_score, 20) * 0.05
-    )::numeric as soft_spot_score
+      -- 1. CHECK SIZE SWEET SPOT (0-30 points)
+      -- Centeredness (0-15): how close deal is to midpoint of range
+      -- Narrowness (0-15): inverse of range width (narrower = better)
+      -- Penalty: both min AND max NULL = 0 points (generalist)
+      (case
+         -- Both bounds NULL: generalist penalty
+         when rr.p_minimum_check_size is null and rr.p_maximum_check_size is null then 0
+         -- Only max defined (0 to max range)
+         when rr.p_minimum_check_size is null and rr.p_maximum_check_size is not null then
+           case
+             when rr.d_project_budget is null then 5  -- partial credit, can't compute centeredness
+             when rr.d_project_budget <= rr.p_maximum_check_size then
+               -- Centeredness: closer to midpoint (max/2) = higher score
+               15.0 * greatest(0, 1.0 - abs(rr.d_project_budget - rr.p_maximum_check_size/2.0) / (rr.p_maximum_check_size/2.0))
+               -- Narrowness bonus based on max size (smaller max = more specific)
+               + least(15.0, 15.0 * (10000000.0 / greatest(rr.p_maximum_check_size, 1)))
+             else 0  -- deal outside range
+           end
+         -- Only min defined (open-ended): partial score, less specific
+         when rr.p_maximum_check_size is null then
+           case
+             when rr.d_project_budget is null then 3
+             when rr.d_project_budget >= rr.p_minimum_check_size then 8  -- matches but open-ended
+             else 0
+           end
+         -- Both bounds defined: full scoring
+         else
+           case
+             when rr.d_project_budget is null then 10  -- partial credit
+             when rr.d_project_budget >= rr.p_minimum_check_size 
+                  and rr.d_project_budget <= rr.p_maximum_check_size then
+               -- Centeredness: distance from midpoint as fraction of half-range
+               15.0 * greatest(0, 1.0 - abs(rr.d_project_budget - (rr.p_minimum_check_size + rr.p_maximum_check_size)/2.0) 
+                                        / greatest((rr.p_maximum_check_size - rr.p_minimum_check_size)/2.0, 1))
+               -- Narrowness: smaller range = higher score (scale to reasonable max)
+               + least(15.0, 15.0 * least(1.0, 50000000.0 / greatest(rr.p_check_size_range_width, 1)))
+             else 0  -- deal outside range
+           end
+       end)
+      
+      -- 2. ASSET TYPE SPECIFICITY (0-20 points)
+      -- Match bonus (10): program's asset types overlap with deal
+      -- Specificity bonus (0-10): fewer total asset types = higher score
+      -- Penalty: empty program asset types = 0 points
+      + (case
+           when rr.p_asset_type_count = 0 then 0  -- generalist penalty
+           when rr.asset_type_ok then
+             10  -- match bonus
+             + least(10.0, 10.0 * (1.0 / greatest(rr.p_asset_type_count, 1)))  -- specificity bonus
+           else 0  -- no match
+         end)
+      
+      -- 3. GEOGRAPHIC SPECIFICITY (0-20 points)
+      -- Match bonus (10): deal location matches program's target
+      -- Specificity bonus (0-10): fewer locations = higher score
+      -- Penalty: NULL/empty locations = 0 points
+      + (case
+           when rr.p_location_count = 0 then 0  -- generalist penalty
+           when rr.location_ok then
+             10  -- match bonus
+             + least(10.0, 10.0 * (1.0 / greatest(rr.p_location_count, 1)))  -- specificity bonus
+           else 0  -- no match
+         end)
+      
+      -- 4. TRANSACTION TYPE SPECIFICITY (0-10 points)
+      -- Match bonus (5): overlap with deal's financing type
+      -- Specificity bonus (0-5): fewer transaction types = higher score
+      -- Penalty: empty = 0 points
+      + (case
+           when rr.p_transaction_type_count = 0 then 0  -- generalist penalty
+           when rr.financing_ok then
+             5  -- match bonus
+             + least(5.0, 5.0 * (1.0 / greatest(rr.p_transaction_type_count, 1)))  -- specificity bonus
+           else 0  -- no match
+         end)
+    )::numeric as sweet_spot_score,
+    -- Recency bonus for recommended sorting (max 2 points)
+    -- 1 point if updated in last 365 days, another 1 point if updated in last 90 days
+    (
+      case when rr.updated_at >= (now() - interval '365 days') then 1 else 0 end
+      + case when rr.updated_at >= (now() - interval '90 days') then 1 else 0 end
+    )::numeric as recency_bonus
   from raw_results rr
 ),
 
--- Rank per organization and pick the top 1 program for each organization.
--- tie-breakers: prefer matched=true, then higher match_score, then newer updated_at, then lower program_id
-ranked as (
+-- Compute recommended_score (sweet_spot + recency) in a separate CTE
+scored as (
   select
     r.*,
-    row_number() over (
-      partition by r.organization_id
-      order by
-        (case when r.matched then 1 else 0 end) desc,
-        r.match_score desc,
-        r.updated_at desc nulls last,
-        r.program_id
-    ) as rn
+    (r.sweet_spot_score + r.recency_bonus)::numeric as recommended_score
   from results r
+),
+
+-- Rank per organization and pick the top 1 program for each organization.
+-- tie-breakers: prefer matched=true, then higher recommended_score, then newer updated_at, then lower program_id
+ranked as (
+  select
+    s.*,
+    row_number() over (
+      partition by s.organization_id
+      order by
+        (case when s.matched then 1 else 0 end) desc,
+        s.recommended_score desc,
+        s.updated_at desc nulls last,
+        s.program_id
+    ) as rn
+  from scored s
 )
 
 -- final: one program per organization, then apply limit and final ordering
@@ -656,12 +859,14 @@ select
   maximum_check_size,
   capital_stack,
   updated_at,
-  extra
+  extra,
+  sweet_spot_score,
+  recommended_score
 from ranked
 where rn = 1
 order by
-  -- [v2 change] Implement dynamic sort modes. Fallback to 'updated' preference if unknown.
-  case when p_sort_by in ('updated','score','check_size','soft_spot') then 0 else 1 end,
+  -- [v2 change] Implement dynamic sort modes. Fallback to 'recommended' if unknown.
+  case when p_sort_by in ('recommended','updated','score','check_size','sweet_spot') then 0 else 1 end,
   -- 'score': matched desc, match_score desc, updated_at desc
   case when p_sort_by = 'score' then (case when matched then 1 else 0 end) end desc nulls last,
   case when p_sort_by = 'score' then match_score end desc nulls last,
@@ -670,32 +875,75 @@ order by
   case when p_sort_by = 'check_size' then check_size_diff end asc nulls last,
   case when p_sort_by = 'check_size' then (case when matched then 1 else 0 end) end desc nulls last,
   case when p_sort_by = 'check_size' then match_score end desc nulls last,
-  -- 'soft_spot': simple heuristic that prefers matched, score, and recency via soft_spot_score
-  case when p_sort_by = 'soft_spot' then soft_spot_score end desc nulls last,
-  -- default 'updated': keep same preference as original
+  -- 'sweet_spot': specificity score only (no recency bonus)
+  case when p_sort_by = 'sweet_spot' then sweet_spot_score end desc nulls last,
+  -- 'updated': sort by updated_at only
+  case when p_sort_by = 'updated' then updated_at end desc nulls last,
+  -- default 'recommended': sweet_spot + recency bonus (new default)
   (case when matched then 1 else 0 end) desc,
-  match_score desc,
+  recommended_score desc nulls last,
   updated_at desc nulls last,
   program_id
 limit p_limit offset p_offset;
 $$;
 
 
--- select * from rpc_match_programs(34);
+-- ============================================================================
+-- TEST QUERIES FOR SWEET SPOT SCORE
+-- ============================================================================
 
--- select * 
--- from rpc_match_programs(
---   p_deal_id := 26,
---   p_filters := NULL, --'{"recourse":["Non-Recourse"],"amortization":"25"}',
---   p_sort_by := 'updated',
---   p_match_only := true,
---   p_limit := 1000
--- );
+-- 1. Basic sweet_spot sorting - returns programs sorted by specificity score
+--    Programs that narrowly target deals like this one rank higher
+select *
+from rpc_match_programs_v6(
+  p_deal_id := 35,
+  p_filters := '{}',
+  p_sort_by := 'sweet_spot',
+  p_match_only := true,
+  p_limit := 100
+);
 
+-- 2. Compare sweet_spot vs default (updated) sorting
+--    Run both and compare which programs appear first
+-- Default sorting (by updated_at):
+select program_id, program_name, match_score, organization_name
+from rpc_match_programs_v6(
+  p_deal_id := 35,
+  p_filters := '{}',
+  p_sort_by := 'updated',
+  p_match_only := true,
+  p_limit := 20
+);
 
+-- Sweet spot sorting (by specificity):
+select program_id, program_name, match_score, organization_name
+from rpc_match_programs_v6(
+  p_deal_id := 35,
+  p_filters := '{}',
+  p_sort_by := 'sweet_spot',
+  p_match_only := true,
+  p_limit := 20
+);
 
--- -- Deal-side numeric normalizations
--- alter table deals
---   add column if not exists net_worth_num numeric generated always as (parse_money_to_numeric(net_worth)) stored,
---   add column if not exists liquidity_num numeric generated always as (parse_money_to_numeric(liquidity)) stored,
---   add column if not exists credit_score_num numeric generated always as (parse_money_to_numeric(credit_score)) stored;
+-- 3. Sweet spot with filters - combines advanced filters with specificity ranking
+select *
+from rpc_match_programs_v6(
+  p_deal_id := 35,
+  p_filters := '{
+    "program_type": "Debt Fund"
+  }',
+  p_sort_by := 'sweet_spot',
+  p_match_only := true,
+  p_limit := 50
+);
+
+-- 4. All candidates with sweet_spot (p_match_only := false)
+--    Shows all programs including near-misses, sorted by specificity
+select program_id, program_name, matched, match_score, match_reasons
+from rpc_match_programs_v6(
+  p_deal_id := 35,
+  p_filters := '{}',
+  p_sort_by := 'sweet_spot',
+  p_match_only := false,
+  p_limit := 50
+);
